@@ -1,0 +1,27 @@
+{% if conversation.messages.exists %}
+    {% for message in conversation.messages.all %}
+    <div class="alert {% if message.is_user %}alert-primary{% else %}alert-secondary{% endif %} mb-3" data-message-id="{{ message.id }}">
+        <div class="d-flex justify-content-between">
+            <span>{{ message.is_user|yesno:"您,助手" }}</span>
+            <div>
+                <small>{{ message.created_at|date:"Y-m-d H:i:s" }}</small>
+                {% if message.is_user %}
+                <button class="btn btn-sm btn-outline-primary edit-message-btn ms-2" title="编辑消息">
+                    <i class="bi bi-pencil"></i>
+                </button>
+                {% else %}
+                <button class="btn btn-sm btn-outline-secondary regenerate-btn ms-2" title="重新生成回复">
+                    <i class="bi bi-arrow-clockwise"></i>
+                </button>
+                {% endif %}
+            </div>
+        </div>
+        <hr>
+        <p>{{ message.content }}</p>
+    </div>
+    {% endfor %}
+{% else %}
+    <div class="text-center p-5">
+        <p class="text-muted">开始新的对话吧</p>
+    </div>
+{% endif %} 

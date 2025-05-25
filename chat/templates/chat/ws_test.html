@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+
+{% block title %}WebSocket测试 - My Chat App{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <h2 class="mb-4">WebSocket测试</h2>
+    
+    <div class="row">
+        <div class="col-md-8 mx-auto">
+            <div class="card">
+                <div class="card-header">
+                    WebSocket连接测试
+                </div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label for="ws-url" class="form-label">WebSocket URL</label>
+                        <input type="text" class="form-control" id="ws-url" value="ws://{{ request.get_host }}/ws/test/">
+                    </div>
+                    <div class="mb-3">
+                        <button id="connect-btn" class="btn btn-primary">连接</button>
+                        <button id="disconnect-btn" class="btn btn-danger" disabled>断开</button>
+                    </div>
+                    <div class="mb-3">
+                        <label for="message-input" class="form-label">发送消息</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="message-input" disabled>
+                            <button id="send-btn" class="btn btn-outline-primary" disabled>发送</button>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">消息记录</label>
+                        <div id="message-log" class="border rounded p-3" style="height: 300px; overflow-y: auto; background-color: #f8f9fa;">
+                            <div class="text-muted">等待连接...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    let socket = null;
+    const connectBtn = document.getElementById('connect-btn');
+    const disconnectBtn = document.getElementById('disconnect-btn');
+    const messageInput = document.getElementById('message-input');
+    const sendBtn = document.getElementById('send-btn');
+    const messageLog = document.getElementById('message-log');
+    const wsUrl = document.getElementById('ws-url');
+    
+    // 添加日志
+    function addLog(message, type = 'info') {
+        const logDiv = document.createElement('div');
+        logDiv.className = type === 'error' ? 'text-danger' : 
+                          type === 'success' ? 'text-success' : 
+                          type === 'received' ? 'text-primary' : 
+                          type === 'sent' ? 'text-secondary' : '';
+        
+        const timestamp = new Date().toLocaleTimeString();
+        logDiv.innerHTML = `<small>[${timestamp}]</small> ${message}`;
+        messageLog.appendChild(logDiv);
+        messageLog.scrollTop = messageLog.scrollHeight;
+    }
+    
+    // 连接WebSocket
+    connectBtn.addEventListener('click', function() {
+        try {
+            socket = new WebSocket(wsUrl.value);
+            
+            socket.onopen = function(e) {
+                addLog('WebSocket连接已建立', 'success');
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+                messageInput.disabled = false;
+                sendBtn.disabled = false;
+            };
+            
+            socket.onmessage = function(e) {
+                addLog(`收到消息: ${e.data}`, 'received');
+            };
+            
+            socket.onclose = function(e) {
+                addLog(`WebSocket连接已关闭: 代码=${e.code} 原因=${e.reason}`, 'info');
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+                messageInput.disabled = true;
+                sendBtn.disabled = true;
+            };
+            
+            socket.onerror = function(e) {
+                addLog('WebSocket发生错误', 'error');
+            };
+        } catch (error) {
+            addLog(`连接错误: ${error.message}`, 'error');
+        }
+    });
+    
+    // 断开连接
+    disconnectBtn.addEventListener('click', function() {
+        if (socket) {
+            socket.close();
+        }
+    });
+    
+    // 发送消息
+    sendBtn.addEventListener('click', function() {
+        if (socket && messageInput.value) {
+            socket.send(messageInput.value);
+            addLog(`发送消息: ${messageInput.value}`, 'sent');
+            messageInput.value = '';
+        }
+    });
+    
+    // 按Enter键发送
+    messageInput.addEventListener('keypress', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendBtn.click();
+        }
+    });
+</script>
+{% endblock %} 

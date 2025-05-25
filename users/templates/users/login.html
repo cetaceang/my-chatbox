@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}登录 - My Chat App{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-md-6">
+            <div class="card shadow">
+                <div class="card-header bg-primary text-white text-center">
+                    <h3 class="mb-0">用户登录</h3>
+                </div>
+                <div class="card-body p-4">
+                    {% if messages %}
+                        {% for message in messages %}
+                            <div class="alert alert-{{ message.tags }}">{{ message }}</div>
+                        {% endfor %}
+                    {% endif %}
+                    
+                    <form method="post" novalidate>
+                        {% csrf_token %}
+                        
+                        <div class="mb-3">
+                            <label for="{{ form.username.id_for_label }}" class="form-label">用户名</label>
+                            {{ form.username.errors }}
+                            <input type="text" name="{{ form.username.html_name }}" class="form-control {% if form.username.errors %}is-invalid{% endif %}" 
+                                id="{{ form.username.id_for_label }}" placeholder="请输入用户名" required>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="{{ form.password.id_for_label }}" class="form-label">密码</label>
+                            {{ form.password.errors }}
+                            <input type="password" name="{{ form.password.html_name }}" class="form-control {% if form.password.errors %}is-invalid{% endif %}" 
+                                id="{{ form.password.id_for_label }}" placeholder="请输入密码" required>
+                        </div>
+                        
+                        <div class="d-grid gap-2">
+                            <button type="submit" class="btn btn-primary">登录</button>
+                        </div>
+                    </form>
+                </div>
+                <div class="card-footer text-center py-3">
+                    <div class="text-muted">
+                        还没有账号？ <a href="{% url 'register' %}" class="text-decoration-none">立即注册</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
