@@ -1,0 +1,30 @@
+.animate-spin {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.btn-processing {
+    opacity: 0.7;
+    pointer-events: none;
+}
+
+/* MathJax CSS Overrides to counteract Bootstrap */
+#message-container mjx-container {
+    /* Reset line-height which Bootstrap might set globally */
+    line-height: normal !important; 
+    /* Ensure text alignment is as MathJax expects */
+    text-align: left !important; 
+    /* Reset font-size that might be inherited */
+    font-size: 1em !important; 
+}
+
+/* Ensure elements within MathJax use its intended fonts/styles */
+#message-container mjx-math * {
+    font-family: inherit !important; /* Allow MathJax fonts */
+    line-height: inherit !important;
+    font-size: inherit !important;
+}

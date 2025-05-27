@@ -15,13 +15,13 @@
                 </button>
                 {% endif %}
             </div>
-        </div>
-        <hr>
-        <p>{{ message.content }}</p>
-    </div>
-    {% endfor %}
+         </div>
+         <hr>
+         <p><span class="render-target" data-original-content="{{ message.content|escapejs }}">{{ message.content }}</span></p> {# Add render-target span and escapejs for data attribute #}
+     </div>
+     {% endfor %}
 {% else %}
     <div class="text-center p-5">
         <p class="text-muted">开始新的对话吧</p>
     </div>
-{% endif %} 
+{% endif %}

@@ -146,6 +146,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # 发送消息到WebSocket
         await self.send(text_data=json.dumps({
             'message': message,
+            'type': 'chat_message', # Add type field back
+            'message': message,
             'is_user': is_user,
             'timestamp': timestamp,
             'message_id': message_id
@@ -262,7 +264,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         'message': response_content,
                         'is_user': False,
                         'message_id': ai_message['id'],
-                        'timestamp': ai_message['timestamp'].strftime('%H:%M:%S')
+                        'timestamp': ai_message['timestamp'].isoformat() # Use ISO format
                     }
                 )
             else:

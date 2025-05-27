@@ -5,24 +5,27 @@
             <h6 class="mb-1 conversation-title" data-conversation-id="{{ conversation.id }}">{{ conversation.title }}</h6>
             <div>
                 <small class="me-2">{{ conversation.created_at|date:"Y-m-d H:i" }}</small>
-                <button type="button" class="btn btn-sm btn-outline-primary edit-title-btn me-1" 
-                        data-conversation-id="{{ conversation.id }}" 
-                        onclick="event.preventDefault(); editConversationTitle({{ conversation.id }});">
+                <button type="button" class="btn btn-sm btn-outline-primary edit-conversation-btn me-1" {# Renamed class slightly for consistency? Or keep edit-title-btn? Let's keep edit-title-btn as chat_page.js uses it #}
+                        data-conversation-id="{{ conversation.id }}">
+                        {# Removed onclick attribute to rely solely on event delegation in chat_page.js #}
                     <i class="bi bi-pencil"></i>
                 </button>
-                <button type="button" class="btn btn-sm btn-outline-danger delete-conversation-btn" 
-                        data-conversation-id="{{ conversation.id }}" 
-                        onclick="event.preventDefault(); deleteConversation({{ conversation.id }});">
+                <button type="button" class="btn btn-sm btn-outline-danger delete-conversation-btn"
+                        data-conversation-id="{{ conversation.id }}">
+                        {# Removed onclick attribute to rely solely on event delegation in chat_page.js #}
                     <i class="bi bi-trash"></i>
                 </button>
             </div>
         </div>
         <p class="mb-1 text-truncate">
-            {% if conversation.messages.exists %}
-                {{ conversation.messages.last.content|truncatechars:50 }}
-            {% else %}
-                <em>空对话</em>
-            {% endif %}
+            {# Use the correct related_name 'message_set' #}
+            {% with last_message=conversation.message_set.last %}
+                {% if last_message %}
+                    {{ last_message.content|truncatechars:50 }}
+                {% else %}
+                    <em>空对话</em>
+                {% endif %}
+            {% endwith %}
         </p>
     </a>
     {% endfor %}
@@ -31,4 +34,4 @@
         <p>没有对话记录</p>
         <a href="{% url 'chat-main' %}?no_new=0" id="new-conversation-btn" class="btn btn-sm btn-primary">创建新对话</a>
     </div>
-{% endif %} 
+{% endif %}
