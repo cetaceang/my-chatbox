@@ -333,27 +333,46 @@ if __name__ == "__main__":
 
 ```
 my_chatbox/
-├── chat/                  # 主要应用目录
-│   ├── consumers.py       # WebSocket消费者
+├── chat/                  # 主要聊天应用
+│   ├── consumers.py       # WebSocket 消费者
 │   ├── models.py          # 数据模型
+│   ├── routing.py         # WebSocket 路由
+│   ├── urls.py            # HTTP URL 路由
+│   ├── migrations/        # 数据库迁移
 │   ├── templates/         # 应用模板
 │   │   └── chat/          # 聊天相关模板
 │   │       ├── chat.html  # 主聊天界面
 │   │       └── ...
-│   ├── urls.py            # URL路由
-│   └── views.py           # 视图函数
+│   └── views/             # 视图模块 (包含页面、API等)
+│       ├── api.py
+│       ├── pages.py
+│       └── ...
 ├── config/                # 项目配置
-│   ├── asgi.py            # ASGI配置(WebSocket)
+│   ├── asgi.py            # ASGI 入口 (WebSocket)
 │   ├── settings.py        # 项目设置
-│   └── urls.py            # 主URL配置
-├── static/                # 静态文件
+│   └── urls.py            # 主 URL 配置
+├── static/                # 开发静态文件源
+│   └── chat/
+│       ├── css/
+│       └── js/
+├── staticfiles/           # 部署用静态文件 (collectstatic后生成)
 ├── templates/             # 全局模板
 ├── users/                 # 用户管理应用
-├── db.sqlite3             # SQLite数据库
+│   ├── models.py
+│   ├── urls.py
+│   ├── views.py
+│   └── templates/
+│       └── users/
+├── .gitignore
+├── deploy_guide.md        # 部署指南
 ├── install_dependencies.py # 依赖安装脚本
+├── LICENSE
+├── manage.py              # Django 管理脚本
+├── README.md
 ├── requirements.txt       # 项目依赖列表
-├── start.py               # 启动脚本
-└── manage.py              # Django管理脚本
+├── run_*.py               # 各种运行脚本 (Windows/Ubuntu/Server)
+├── start.py               # 统一启动脚本
+└── db.sqlite3             # SQLite 数据库 (默认)
 ```
 
 ## 主要依赖
