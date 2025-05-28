@@ -846,3 +846,146 @@ def delete_message_api(request):
             'success': False,
             'message': f"处理请求失败: {str(e)}"
         }, status=500)
+
+@login_required
+@csrf_exempt
+@require_http_methods(["POST"])
+def debug_response_api(request):
+    """处理API调试请求并返回原始响应"""
+    try:
+        data = json.loads(request.body)
+        provider_id = data.get('provider_id')
+        model_name = data.get('model_name')
+        messages = data.get('messages', [])
+        temperature = data.get('temperature', 0.7)
+        max_tokens = data.get('max_tokens', 1000)
+        stream_mode = data.get('stream', False)
+
+        if not provider_id or not model_name or not messages:
+            return JsonResponse({
+                'success': False,
+                'message': "缺少必要参数 (provider_id, model_name, messages)"
+            }, status=400)
+
+        # 获取服务提供商
+        provider = get_object_or_404(AIProvider, id=provider_id)
+
+        # 构建API URL
+        api_url = ensure_valid_api_url(provider.base_url, "/v1/chat/completions")
+        
+        # 构建请求数据
+        request_data = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": stream_mode
+        }
+
+        # 发送请求到AI服务提供商
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {provider.api_key}"
+        }
+
+        logger.info(f"API调试 - 发送请求到: {api_url}")
+
+        try:
+            if stream_mode:
+                # 处理流式响应
+                response = requests.post(
+                    api_url,
+                    json=request_data,
+                    headers=headers,
+                    stream=True,
+                    timeout=60
+                )
+                
+                # 收集流式响应数据
+                chunks = []
+                full_content = ""
+                
+                if response.status_code == 200:
+                    for chunk in response.iter_lines():
+                        if chunk:
+                            # 处理数据行
+                            try:
+                                # 移除 "data: " 前缀
+                                if chunk.startswith(b'data: '):
+                                    chunk_data = chunk[6:].decode('utf-8')
+                                    
+                                    if chunk_data.strip() == '[DONE]':
+                                        chunks.append({'done': True})
+                                        continue
+                                    
+                                    chunk_json = json.loads(chunk_data)
+                                    chunks.append(chunk_json)
+                                    
+                                    # 尝试提取内容
+                                    if 'choices' in chunk_json and len(chunk_json['choices']) > 0:
+                                        if 'delta' in chunk_json['choices'][0]:
+                                            delta = chunk_json['choices'][0]['delta']
+                                            if 'content' in delta and delta['content']:
+                                                full_content += delta['content']
+                            except Exception as e:
+                                logger.error(f"处理流式响应片段时出错: {str(e)}")
+                    
+                    return JsonResponse({
+                        'success': True,
+                        'status_code': response.status_code,
+                        'is_stream': True,
+                        'chunks': chunks[:10],  # 只返回前10个数据块
+                        'chunks_count': len(chunks),
+                        'full_content': full_content
+                    })
+                else:
+                    # 处理流式请求的错误响应
+                    try:
+                        error_text = next(response.iter_lines()).decode('utf-8', errors='ignore')
+                    except:
+                        error_text = "无法读取错误响应"
+                    
+                    return JsonResponse({
+                        'success': False,
+                        'status_code': response.status_code,
+                        'raw_text': error_text
+                    })
+            else:
+                # 处理普通响应
+                response = requests.post(
+                    api_url,
+                    json=request_data,
+                    headers=headers,
+                    timeout=60
+                )
+                
+                try:
+                    response_json = response.json()
+                    return JsonResponse({
+                        'success': response.status_code == 200,
+                        'status_code': response.status_code,
+                        'is_stream': False,
+                        'raw_response': response_json
+                    })
+                except json.JSONDecodeError:
+                    return JsonResponse({
+                        'success': False,
+                        'status_code': response.status_code,
+                        'raw_text': response.text[:1000]  # 限制返回文本大小
+                    })
+                
+        except requests.exceptions.RequestException as req_err:
+            logger.error(f"API调试 - 请求失败: {req_err}")
+            return JsonResponse({
+                'success': False,
+                'message': f"请求失败: {req_err}",
+                'error_type': type(req_err).__name__
+            }, status=500)
+            
+    except Exception as e:
+        logger.error(f"API调试请求处理失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JsonResponse({
+            'success': False,
+            'message': f"处理请求失败: {str(e)}"
+        }, status=500)

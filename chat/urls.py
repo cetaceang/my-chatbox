@@ -14,6 +14,7 @@ urlpatterns = [
     path('api/providers/', admin_api.manage_providers_api, name='api-providers'),
     path('api/test-connection/<int:provider_id>/', admin_api.test_api_connection, name='api-test-connection'),
     path('api/debug/', admin_api.debug_api_response, name='api-debug'),
+    path('api/debug_response/', api.debug_response_api, name='api-debug-response'),
 
     # API接口 - Core Chat
     path('api/chat/', api.chat_api, name='api-chat'),

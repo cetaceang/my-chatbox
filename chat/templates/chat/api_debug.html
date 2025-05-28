@@ -2,7 +2,12 @@
 
 {% block content %}
 <div class="container mt-4">
-    <h1 class="mb-4">API调试工具</h1>
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1>API调试工具</h1>
+        <a href="{% url 'chat-settings' %}" class="btn btn-outline-secondary">
+            <i class="bi bi-arrow-left"></i> 返回设置
+        </a>
+    </div>
     <p class="text-muted">使用此工具直接测试API响应格式，帮助诊断兼容性问题</p>
     
     <div class="card">
