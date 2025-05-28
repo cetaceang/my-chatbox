@@ -114,55 +114,32 @@ document.addEventListener("DOMContentLoaded", () => {
                 sendButton.classList.add('btn-processing');
                 sendButton.innerHTML = '<i class="bi bi-arrow-clockwise animate-spin"></i>';
 
-
+                // 生成临时ID
                 const tempId = 'temp-' + Date.now();
 
-                // Display user message immediately
-                const userMessageDiv = document.createElement('div');
-                userMessageDiv.className = 'alert alert-primary';
-                userMessageDiv.setAttribute('data-message-id', tempId);
-                userMessageDiv.setAttribute('data-temp-id', tempId); // Store temp ID
-                userMessageDiv.setAttribute('data-waiting-id', '1'); // Mark as waiting for real ID
-                const timestamp = new Date().toLocaleTimeString();
-                userMessageDiv.innerHTML = `
-                    <div class="d-flex justify-content-between">
-                        <span>您</span>
-                        <div>
-                            <small>${timestamp}</small>
-                            <button class="btn btn-sm btn-outline-primary edit-message-btn ms-2" title="编辑消息">
-                                <i class="bi bi-pencil"></i>
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary regenerate-btn ms-2" title="重新生成回复">
-                                <i class="bi bi-arrow-clockwise"></i>
-                            </button>
-                            <button class="btn btn-sm btn-outline-danger delete-message-btn ms-2" title="删除消息">
-                                <i class="bi bi-trash"></i>
-                            </button>
-                        </div>
-                    </div>
-                    <hr>
-                    <p><span class="render-target" data-original-content="${escapeHtml(message)}">${escapeHtml(message)}</span></p>
-                `;
+                // 使用组件工厂创建用户消息
+                const userMessageDiv = window.MessageFactory.createUserMessage(tempId, message);
+                
+                // 添加到消息容器
                 if (messageContainer) {
                     messageContainer.appendChild(userMessageDiv);
-                    renderMessageContent(userMessageDiv); // Render user message
+                    renderMessageContent(userMessageDiv); // 渲染用户消息
                     userMessageDiv.scrollIntoView();
                 }
 
-                // Add AI loading indicator
-                const loadingDiv = createLoadingIndicator(); // Use helper from api_handler
-                 if (messageContainer) {
+                // 添加AI加载指示器
+                const loadingDiv = window.MessageFactory.createLoadingIndicator();
+                if (messageContainer) {
                     messageContainer.appendChild(loadingDiv);
                     loadingDiv.scrollIntoView();
-                 }
+                }
 
-
-                // Attempt to send via WebSocket first
+                // 尝试通过WebSocket发送
                 const sentViaWebSocket = sendWebSocketMessage(message, modelId, tempId);
 
                 if (!sentViaWebSocket) {
-                    console.log("WebSocket unavailable, falling back to HTTP API for sending.");
-                    // Fallback to HTTP API
+                    console.log("WebSocket不可用，回退到HTTP API发送");
+                    // 回退到HTTP API
                     fetch('/chat/api/chat/', {
                         method: 'POST',
                         headers: {
@@ -184,66 +161,92 @@ document.addEventListener("DOMContentLoaded", () => {
                         return response.json();
                     })
                     .then(data => {
-                        // Update user message ID if provided by API response
+                        // 更新用户消息ID
                         if (data.user_message_id) {
                             tempIdMap[tempId] = data.user_message_id;
-                            console.log(`API Response: Updated tempIdMap: ${tempId} -> ${data.user_message_id}`);
+                            console.log(`API响应: 更新tempIdMap: ${tempId} -> ${data.user_message_id}`);
+                            
+                            // 更新DOM元素ID
                             const msgDiv = messageContainer?.querySelector(`.alert[data-temp-id="${tempId}"]`);
                             if (msgDiv) {
                                 msgDiv.setAttribute('data-message-id', data.user_message_id);
                                 msgDiv.removeAttribute('data-waiting-id');
-                                console.log(`API Response: Updated DOM user message ID.`);
+                                console.log(`API响应: 更新DOM用户消息ID`);
+                                
+                                // 更新状态管理器中的消息ID
+                                const messageState = window.ChatState.getMessage(tempId);
+                                if (messageState) {
+                                    // 注册新ID的消息状态
+                                    window.ChatState.registerMessage(
+                                        data.user_message_id, 
+                                        messageState.content, 
+                                        messageState.isUser, 
+                                        msgDiv
+                                    );
+                                    // 移除临时ID的消息状态
+                                    window.ChatState.removeMessage(tempId);
+                                    console.log(`状态管理器: ${tempId} -> ${data.user_message_id}`);
+                                }
                             }
                         }
 
-                        // --- Handle New Conversation Creation (HTTP API) ---
-                        // Assumes backend returns 'new_conversation_id' when a new convo is created
+                        // 处理新对话创建
                         if (isNewConversation && data.success && data.new_conversation_id) {
-                            console.log("New conversation created via API. New ID:", data.new_conversation_id);
-                            window.conversationId = data.new_conversation_id; // Update global ID
-                            storeConversationId(window.conversationId); // Store it
+                            console.log("通过API创建了新对话。新ID:", data.new_conversation_id);
+                            window.conversationId = data.new_conversation_id;
+                            storeConversationId(window.conversationId);
 
-                            // Update the URL without reloading the page
+                            // 更新URL但不重新加载页面
                             const newUrl = `/chat/?conversation_id=${window.conversationId}`;
                             history.pushState({ conversationId: window.conversationId }, '', newUrl);
-                            console.log("URL updated to:", newUrl);
+                            console.log("URL已更新为:", newUrl);
 
-                            // Refresh the conversation list in the sidebar
+                            // 刷新侧边栏对话列表
                             refreshConversationList();
 
-                            // Initialize WebSocket with the new ID
+                            // 使用新ID初始化WebSocket
                             initWebSocket();
                         }
-                        // --- End New Conversation Handling ---
 
-
-                        // Remove loading indicator
+                        // 移除加载指示器
                         loadingDiv.remove();
 
                         if (data.success) {
-                            // Display AI response
-                            const aiMessageDiv = createAIMessageDiv(data.message, data.message_id, data.timestamp); // Use helper
+                            // 使用组件工厂创建AI消息
+                            const aiMessageDiv = window.MessageFactory.createAIMessage(data.message_id, data.message);
                             if (messageContainer) {
                                 messageContainer.appendChild(aiMessageDiv);
-                                renderMessageContent(aiMessageDiv); // Render AI message
+                                renderMessageContent(aiMessageDiv);
                                 aiMessageDiv.scrollIntoView();
                             }
                         } else {
-                            console.error("API Error:", data.message);
-                            // If creating a new conversation failed, reset conversationId
+                            console.error("API错误:", data.message);
+                            // 如果创建新对话失败，重置conversationId
                             if (isNewConversation) {
                                 window.conversationId = null;
                             }
-                            displaySystemError(`处理AI回复出错: ${data.message}`); // Use helper
+                            
+                            // 显示错误消息
+                            const errorDiv = window.MessageFactory.createErrorMessage(`处理AI回复出错: ${data.message}`);
+                            if (messageContainer) {
+                                messageContainer.appendChild(errorDiv);
+                                errorDiv.scrollIntoView();
+                            }
                         }
                     })
                     .catch(error => {
-                        console.error('Error sending message via API:', error);
-                        loadingDiv.remove(); // Ensure loading removed on error
-                        displaySystemError(`发送消息失败: ${error.message}`); // Use helper
+                        console.error('通过API发送消息时出错:', error);
+                        loadingDiv.remove();
+                        
+                        // 显示错误消息
+                        const errorDiv = window.MessageFactory.createErrorMessage(`发送消息失败: ${error.message}`);
+                        if (messageContainer) {
+                            messageContainer.appendChild(errorDiv);
+                            errorDiv.scrollIntoView();
+                        }
                     })
                     .finally(() => {
-                        // Re-enable input/button regardless of API success/failure
+                        // 无论API成功或失败都重新启用输入/按钮
                         messageInput.value = '';
                         messageInput.disabled = false;
                         sendButton.disabled = false;
@@ -252,21 +255,21 @@ document.addEventListener("DOMContentLoaded", () => {
                         messageInput.focus();
                     });
                 } else {
-                     // If sent via WebSocket, re-enable UI immediately
-                     messageInput.value = '';
-                     messageInput.disabled = false;
-                     sendButton.disabled = false;
-                     sendButton.classList.remove('btn-processing');
-                      sendButton.innerHTML = '<i class="bi bi-send"></i>';
-                      messageInput.focus();
-                 }
+                    // 如果通过WebSocket发送，立即重新启用UI
+                    messageInput.value = '';
+                    messageInput.disabled = false;
+                    sendButton.disabled = false;
+                    sendButton.classList.remove('btn-processing');
+                    sendButton.innerHTML = '<i class="bi bi-send"></i>';
+                    messageInput.focus();
+                }
             } else if (message === '') {
-                 // Handle empty message case separately if needed
-                 console.log("Message input is empty.");
+                // 处理空消息情况
+                console.log("消息输入为空");
             } else if (!window.conversationId && !isNewConversation) {
-                 // This case should ideally not happen if logic is correct
-                 console.error("State inconsistency: No conversation ID and not flagged as new conversation.");
-                 alert("出现错误，请刷新页面。");
+                // 这种情况理论上不应该发生
+                console.error("状态不一致: 没有对话ID且未标记为新对话");
+                alert("出现错误，请刷新页面");
             }
         };
     } else {
@@ -301,48 +304,138 @@ document.addEventListener("DOMContentLoaded", () => {
             // Edit Button
             else if (target.closest('.edit-message-btn')) {
                 e.stopPropagation();
-                const renderTarget = messageDiv.querySelector('p > .render-target');
-                if (!renderTarget) return; // Cannot edit if structure is wrong
-
-                const originalContent = renderTarget.getAttribute('data-original-content');
-                const originalHTML = messageDiv.innerHTML; // Store original structure
-
-                // Replace content with textarea
+                
+                // 获取消息ID和相关信息
+                const messageId = messageDiv.getAttribute('data-message-id') || messageDiv.getAttribute('data-temp-id');
+                if (!messageId) {
+                    console.error("无法找到消息ID");
+                    return;
+                }
+                
+                // 从状态管理器获取消息内容
+                const messageState = window.ChatState.getMessage(messageId);
+                let originalContent = '';
+                
+                if (messageState) {
+                    originalContent = messageState.content;
+                } else {
+                    // 回退到DOM属性
+                    const renderTarget = messageDiv.querySelector('p > .render-target');
+                    if (!renderTarget) return;
+                    originalContent = renderTarget.getAttribute('data-original-content') || '';
+                }
+                
+                // 保存编辑状态信息
+                const messageInfo = {
+                    id: messageId,
+                    content: originalContent,
+                    isUser: messageDiv.classList.contains('alert-primary')
+                };
+                
+                // 替换为编辑界面
                 messageDiv.innerHTML = `
-                    <div class="mb-2">
-                        <textarea class="form-control edit-textarea" rows="3">${escapeHtml(originalContent)}</textarea>
+                    <div class="mb-3">
+                        <textarea class="form-control edit-textarea" rows="4">${escapeHtml(originalContent)}</textarea>
                     </div>
                     <div class="d-flex justify-content-end">
                         <button class="btn btn-sm btn-secondary cancel-edit-btn me-2">取消</button>
                         <button class="btn btn-sm btn-primary save-edit-btn">保存</button>
                     </div>
                 `;
-                // Store original HTML and ID for save/cancel
-                messageDiv.setAttribute('data-original-html', originalHTML);
-                messageDiv.setAttribute('data-editing-id', messageId); // Store ID for save button
+                
+                // 保存恢复信息
+                messageDiv.setAttribute('data-edit-info', JSON.stringify(messageInfo));
                 messageDiv.querySelector('.edit-textarea').focus();
             }
 
             // Cancel Edit Button
             else if (target.closest('.cancel-edit-btn')) {
                 e.stopPropagation();
-                const originalHTML = messageDiv.getAttribute('data-original-html');
-                if (originalHTML) {
-                    messageDiv.innerHTML = originalHTML;
-                    messageDiv.removeAttribute('data-original-html');
-                    messageDiv.removeAttribute('data-editing-id');
-                    renderMessageContent(messageDiv); // Re-render original content
+                
+                try {
+                    // 获取编辑前的信息
+                    const editInfo = JSON.parse(messageDiv.getAttribute('data-edit-info') || '{}');
+                    if (!editInfo.id || !editInfo.content) {
+                        throw new Error('Missing edit info');
+                    }
+                    
+                    // 从状态管理器获取最新状态，如果存在
+                    const messageState = window.ChatState.getMessage(editInfo.id);
+                    
+                    if (messageState) {
+                        // 使用状态管理器重建元素
+                        window.MessageFactory.updateDOMForMessage(editInfo.id);
+                    } else {
+                        // 回退到原始重建函数
+                        rebuildMessageElement(messageDiv, editInfo.id, editInfo.content, editInfo.isUser);
+                    }
+                    
+                    messageDiv.removeAttribute('data-edit-info');
+                } catch (err) {
+                    console.error('Error cancelling edit:', err);
+                    // 如果恢复失败，刷新页面
+                    window.location.reload();
                 }
             }
 
             // Save Edit Button
             else if (target.closest('.save-edit-btn')) {
                 e.stopPropagation();
-                const editingId = messageDiv.getAttribute('data-editing-id');
-                const originalHTML = messageDiv.getAttribute('data-original-html');
-                const newContent = messageDiv.querySelector('.edit-textarea').value;
-                if (editingId && originalHTML) {
-                    saveMessageEdit(editingId, newContent, messageDiv, originalHTML); // Use function from api_handler
+                
+                try {
+                    // 获取编辑信息和新内容
+                    const editInfo = JSON.parse(messageDiv.getAttribute('data-edit-info') || '{}');
+                    if (!editInfo.id) {
+                        throw new Error('Missing message ID in edit info');
+                    }
+                    
+                    const newContent = messageDiv.querySelector('.edit-textarea').value;
+                    
+                    // 检查内容是否有变化
+                    if (newContent === editInfo.content) {
+                        console.log("内容未变化，恢复原始显示");
+                        // 直接恢复显示，不触发更新
+                        const messageState = window.ChatState.getMessage(editInfo.id);
+                        
+                        if (messageState) {
+                            window.MessageFactory.updateDOMForMessage(editInfo.id);
+                        } else {
+                            rebuildMessageElement(messageDiv, editInfo.id, editInfo.content, editInfo.isUser);
+                        }
+                        
+                        messageDiv.removeAttribute('data-edit-info');
+                        return;
+                    }
+                    
+                    // 使用状态管理器更新消息
+                    if (window.ChatState.getMessage(editInfo.id)) {
+                        console.log("使用状态管理器更新消息");
+                        
+                        // 保存编辑到服务器并在成功后更新状态
+                        saveMessageToServer(editInfo.id, newContent, editInfo.isUser)
+                            .then(success => {
+                                if (success) {
+                                    // 更新状态，触发DOM更新
+                                    window.ChatState.updateMessage(editInfo.id, newContent);
+                                    
+                                    // 如果是用户消息，触发重新生成
+                                    if (editInfo.isUser) {
+                                        setTimeout(() => {
+                                            regenerateResponse(editInfo.id);
+                                        }, 100);
+                                    }
+                                }
+                            });
+                    } else {
+                        console.log("使用传统方式更新消息");
+                        // 回退到传统编辑功能
+                        completeMessageEdit(editInfo.id, newContent, messageDiv, editInfo.isUser);
+                    }
+                    
+                    messageDiv.removeAttribute('data-edit-info');
+                } catch (err) {
+                    console.error('Error saving edit:', err);
+                    alert('保存编辑时出错，请刷新页面后重试');
                 }
             }
 
@@ -543,3 +636,161 @@ window.refreshConversationList = refreshConversationList;
 //         syncConversationData(); // Trigger sync if temp IDs are waiting
 //     }
 // }
+
+// 完全重建消息元素
+function rebuildMessageElement(messageDiv, messageId, content, isUser) {
+    console.log(`Rebuilding message element for ID: ${messageId}`);
+    
+    // 保留原始CSS类和属性
+    const alertClass = isUser ? 'alert-primary' : 'alert-secondary';
+    
+    // 清空元素
+    messageDiv.innerHTML = '';
+    
+    // 设置必要的类和属性
+    messageDiv.className = `alert ${alertClass} mb-3`;
+    messageDiv.setAttribute('data-message-id', messageId);
+    
+    // 创建消息头部（用户/助手标识、时间戳和按钮）
+    const timestamp = new Date().toLocaleTimeString();
+    let buttonsHTML = '';
+    
+    if (isUser) {
+        buttonsHTML = `
+            <button class="btn btn-sm btn-outline-primary edit-message-btn ms-2" title="编辑消息">
+                <i class="bi bi-pencil"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-secondary regenerate-btn ms-2" title="重新生成回复">
+                <i class="bi bi-arrow-clockwise"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-danger delete-message-btn ms-2" title="删除消息">
+                <i class="bi bi-trash"></i>
+            </button>
+        `;
+    } else {
+        buttonsHTML = `
+            <button class="btn btn-sm btn-outline-danger delete-message-btn ms-2" title="删除消息">
+                <i class="bi bi-trash"></i>
+            </button>
+        `;
+    }
+    
+    // 构建HTML结构
+    messageDiv.innerHTML = `
+        <div class="d-flex justify-content-between">
+            <span>${isUser ? '您' : '助手'}</span>
+            <div>
+                <small>${timestamp}</small>
+                ${buttonsHTML}
+            </div>
+        </div>
+        <hr>
+        <p><span class="render-target" data-original-content="${escapeHtml(content)}"></span></p>
+    `;
+    
+    // 触发渲染
+    console.log("Triggering render of rebuilt message");
+    setTimeout(() => {
+        renderMessageContent(messageDiv);
+        
+        // 确保MathJax在渲染后处理
+        setTimeout(() => {
+            if (typeof MathJax !== 'undefined' && MathJax.typesetPromise) {
+                console.log("Force typesetting after rebuild");
+                MathJax.typesetPromise([messageDiv]).catch(err => 
+                    console.error("MathJax error in rebuild:", err)
+                );
+            }
+        }, 100);
+    }, 0);
+    
+    return true;
+}
+
+// 完成消息编辑
+function completeMessageEdit(messageId, newContent, messageDiv, isUser) {
+    console.log(`Completing edit for message ${messageId}`);
+    
+    // 首先重建元素显示新内容
+    rebuildMessageElement(messageDiv, messageId, newContent, isUser);
+    
+    // 如果是临时ID，无需保存到服务器
+    if (messageId.startsWith('temp-')) {
+        console.log("Temporary message edited locally only");
+        return;
+    }
+    
+    // 将编辑发送到服务器
+    const realId = getRealMessageId(messageId) || messageId;
+    console.log(`Sending edit to server for ID: ${realId}`);
+    
+    fetch('/chat/api/messages/edit/', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCookie('csrftoken')
+        },
+        body: JSON.stringify({ 'message_id': realId, 'content': newContent })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            console.log("Server confirmed edit success");
+            
+            // 如果是用户消息，触发重新生成
+            if (isUser) {
+                console.log("User message edited, triggering regeneration");
+                setTimeout(() => {
+                    regenerateResponse(realId);
+                }, 100); // 短暂延迟确保UI先更新
+            }
+        } else {
+            console.error("Server rejected edit:", data.message);
+            alert(`更新消息失败: ${data.message}`);
+        }
+    })
+    .catch(error => {
+        console.error('Error updating message:', error);
+        alert('更新消息时出错，请稍后再试');
+    });
+}
+
+// 将消息保存到服务器
+function saveMessageToServer(messageId, content, isUser) {
+    console.log(`保存消息到服务器: ${messageId}`);
+    
+    // 如果是临时ID，仅在本地更新
+    if (messageId.startsWith('temp-')) {
+        console.log("临时消息ID，跳过服务器保存");
+        return Promise.resolve(true);
+    }
+    
+    // 获取真实ID (处理临时ID映射)
+    const realId = getRealMessageId(messageId) || messageId;
+    
+    // 发送到服务器
+    return fetch('/chat/api/messages/edit/', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCookie('csrftoken')
+        },
+        body: JSON.stringify({ 'message_id': realId, 'content': content })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            console.log("服务器确认消息保存成功");
+            return true;
+        } else {
+            console.error("服务器拒绝消息保存:", data.message);
+            alert(`更新消息失败: ${data.message}`);
+            return false;
+        }
+    })
+    .catch(error => {
+        console.error('保存消息时出错:', error);
+        alert('更新消息时出错，请稍后再试');
+        return false;
+    });
+}

@@ -502,29 +502,64 @@ function deleteMessage(messageId, messageDiv) {
 function saveMessageEdit(messageId, newContent, messageDiv, originalHTML) {
     console.log(`Attempting to save edit for message: ${messageId}`);
 
-    // Restore original HTML structure first to maintain button/layout consistency
-    messageDiv.innerHTML = originalHTML;
-    messageDiv.removeAttribute('data-original-html'); // Clean up attribute
-    const renderTarget = messageDiv.querySelector('p > .render-target');
-
-    // Handle temporary message editing (update DOM only)
-    if (messageId.startsWith('temp-')) {
-        console.log("Editing temporary message content locally.");
-        if (renderTarget) {
-            renderTarget.setAttribute('data-original-content', newContent);
-            renderMessageContent(messageDiv); // Re-render with new content
-        } else {
-            messageDiv.querySelector('p').textContent = newContent; // Fallback
+    // 完全重构消息元素的内容部分
+    function rebuildMessageContent(container, content) {
+        // 找到消息内容的p元素
+        const contentP = container.querySelector('p');
+        if (!contentP) {
+            console.error("Cannot find p element in message div");
+            return false;
         }
-        // Do not trigger regenerate for temp messages
+        
+        // 清空p元素内容
+        contentP.innerHTML = '';
+        
+        // 创建新的render-target元素
+        const renderTarget = document.createElement('span');
+        renderTarget.className = 'render-target';
+        renderTarget.setAttribute('data-original-content', content);
+        
+        // 将新元素添加到p中
+        contentP.appendChild(renderTarget);
+        
+        // 确保renderMessageContent函数在下一轮事件循环中执行
+        setTimeout(() => {
+            console.log("Calling renderMessageContent after rebuild");
+            renderMessageContent(container);
+            
+            // 再次延迟调用MathJax渲染，确保内容已完全加载
+            setTimeout(() => {
+                if (typeof MathJax !== 'undefined' && MathJax.typesetPromise) {
+                    console.log("Force typesetting after edit with MathJax");
+                    MathJax.typesetPromise([container]).catch(err => 
+                        console.error("MathJax error:", err)
+                    );
+                }
+            }, 100);
+        }, 0);
+        
+        return true;
+    }
+
+    // 恢复原始的DOM结构（按钮、布局等）
+    messageDiv.innerHTML = originalHTML;
+    messageDiv.removeAttribute('data-original-html');
+
+    // 处理临时消息编辑（仅更新DOM）
+    if (messageId.startsWith('temp-')) {
+        console.log("Editing temporary message (local only)");
+        if (rebuildMessageContent(messageDiv, newContent)) {
+            console.log("Temporary message updated successfully");
+        } else {
+            console.error("Failed to update temporary message content");
+        }
         return;
     }
 
-    // Handle real message editing (send to server)
-    // Use getRealMessageId just in case (though should be real ID by now)
-    const realId = getRealMessageId(messageId) || messageId; // Fallback to original if lookup fails
+    // 处理真实消息编辑（发送到服务器）
+    const realId = getRealMessageId(messageId) || messageId;
 
-    console.log(`Sending edit request for real message ID: ${realId}`);
+    console.log(`Sending edit request for message ID: ${realId}`);
     fetch('/chat/api/messages/edit/', {
         method: 'POST',
         headers: {
@@ -536,41 +571,46 @@ function saveMessageEdit(messageId, newContent, messageDiv, originalHTML) {
     .then(response => response.json())
     .then(data => {
         if (data.success) {
-            console.log("Message edit saved successfully on server.");
-            // Update the DOM content definitively
-            if (renderTarget) {
-                renderTarget.setAttribute('data-original-content', newContent);
-                renderMessageContent(messageDiv); // Re-render
+            console.log("Message edit saved successfully on server");
+            
+            // 重建消息内容
+            if (rebuildMessageContent(messageDiv, newContent)) {
+                console.log("Message content updated successfully in DOM");
+                
+                // 如果是用户消息，触发重新生成
+                if (messageDiv.classList.contains('alert-primary')) {
+                    console.log("User message edited, triggering regeneration");
+                    regenerateResponse(realId);
+                }
             } else {
-                messageDiv.querySelector('p').textContent = newContent; // Fallback
-            }
-
-            // If it was a user message, trigger regeneration
-            if (messageDiv.classList.contains('alert-primary')) {
-                console.log("User message edited, triggering regeneration.");
-                regenerateResponse(realId); // Use the real ID
+                console.error("Failed to update message content in DOM");
             }
         } else {
             alert('更新消息失败: ' + data.message);
-            // Content is already visually restored to original via innerHTML reset at start
-            // Re-render the original content just to be sure
-            if (renderTarget) {
-                 const originalContent = renderTarget.getAttribute('data-original-content'); // Get original again
-                 renderTarget.setAttribute('data-original-content', originalContent); // Reset just in case
-                 renderMessageContent(messageDiv);
+            // 获取原始内容
+            const originalRenderTarget = messageDiv.querySelector('p > .render-target');
+            const originalContent = originalRenderTarget ? 
+                originalRenderTarget.getAttribute('data-original-content') : '';
+                
+            // 重建原始内容
+            if (originalContent) {
+                rebuildMessageContent(messageDiv, originalContent);
             }
         }
     })
     .catch(error => {
         console.error('Error updating message:', error);
         alert('更新消息时出错，请稍后再试。');
-        // Content is already visually restored
-        // Re-render original content
-         if (renderTarget) {
-             const originalContent = renderTarget.getAttribute('data-original-content');
-             renderTarget.setAttribute('data-original-content', originalContent);
-             renderMessageContent(messageDiv);
-         }
+        
+        // 获取原始内容
+        const originalRenderTarget = messageDiv.querySelector('p > .render-target');
+        const originalContent = originalRenderTarget ? 
+            originalRenderTarget.getAttribute('data-original-content') : '';
+            
+        // 重建原始内容
+        if (originalContent) {
+            rebuildMessageContent(messageDiv, originalContent);
+        }
     });
 }
 

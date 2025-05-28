@@ -125,56 +125,78 @@ function initWebSocket() {
 
          // Handle streaming update
          if (data.update && data.content) {
-            // Find the last assistant message (potentially the loading one)
+            // 寻找最后的助手消息（可能是加载中的消息）
             let lastAssistantMessage = messageContainer.querySelector('#ai-response-loading');
             if (!lastAssistantMessage) {
-                 // If no loading message, find the actual last secondary alert
-                 const secondaryMessages = messageContainer.querySelectorAll('.alert.alert-secondary');
-                 if (secondaryMessages.length > 0) {
-                      lastAssistantMessage = secondaryMessages[secondaryMessages.length - 1];
-                 }
+                // 如果没有加载中的消息，寻找最后一个次要警告框
+                const secondaryMessages = messageContainer.querySelectorAll('.alert.alert-secondary');
+                if (secondaryMessages.length > 0) {
+                    lastAssistantMessage = secondaryMessages[secondaryMessages.length - 1];
+                }
             }
 
-
             if (lastAssistantMessage) {
-                const renderTarget = lastAssistantMessage.querySelector('p > .render-target');
-                if (renderTarget) {
-                    // Append new content to the original content attribute
-                    let currentOriginal = renderTarget.getAttribute('data-original-content') || '';
-                    currentOriginal += data.content;
-                    renderTarget.setAttribute('data-original-content', currentOriginal);
-
-                    // Re-render the target span. renderMessageContent handles MathJax.
-                    renderMessageContent(lastAssistantMessage);
-                    lastAssistantMessage.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                // 检查消息是否已在状态管理器中
+                const messageId = lastAssistantMessage.getAttribute('data-message-id') || '';
+                const isLoading = lastAssistantMessage.id === 'ai-response-loading';
+                
+                if (!isLoading && messageId && window.ChatState && window.ChatState.getMessage(messageId)) {
+                    // 使用状态管理器更新消息
+                    console.log(`[WS] 使用状态管理器更新消息 ${messageId}`);
+                    const messageState = window.ChatState.getMessage(messageId);
+                    const newContent = messageState.content + data.content;
+                    
+                    // 更新状态（这将触发DOM更新）
+                    window.ChatState.updateMessage(messageId, newContent);
                 } else {
-                     console.warn("Streaming update: Could not find render target in last assistant message.");
-                     // Fallback: append directly to p tag if structure is old or loading indicator
-                     const contentP = lastAssistantMessage.querySelector('p'); // Might not exist in loading
-                     if (contentP) {
-                          // This might break rendering, better to ensure renderTarget exists
-                          // contentP.innerHTML += escapeHtml(data.content); // Avoid direct innerHTML append if possible
-                          console.warn("Appending directly to <p>, rendering might be inconsistent.");
-                     } else if (lastAssistantMessage.id === 'ai-response-loading') {
-                          // If it's the loading indicator, create the p and render target
-                          const p = document.createElement('p');
-                          const span = document.createElement('span');
-                          span.className = 'render-target';
-                          span.setAttribute('data-original-content', data.content);
-                          p.appendChild(span);
-                          // Find where to insert the paragraph (e.g., after hr)
-                          const hr = lastAssistantMessage.querySelector('hr');
-                          if (hr) {
-                               hr.insertAdjacentElement('afterend', p);
-                          } else {
-                               lastAssistantMessage.appendChild(p); // Append if no hr
-                          }
-                          renderMessageContent(lastAssistantMessage); // Render the newly created target
-                          lastAssistantMessage.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                     }
+                    // 回退到旧的更新方法
+                    console.log(`[WS] 使用传统方法更新消息`);
+                    const renderTarget = lastAssistantMessage.querySelector('p > .render-target');
+                    
+                    if (renderTarget) {
+                        // 追加新内容到原始内容属性
+                        let currentOriginal = renderTarget.getAttribute('data-original-content') || '';
+                        currentOriginal += data.content;
+                        renderTarget.setAttribute('data-original-content', currentOriginal);
+                        
+                        // 重新渲染目标span
+                        renderMessageContent(lastAssistantMessage);
+                        lastAssistantMessage.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    } else if (isLoading) {
+                        // 如果是加载指示器，创建p和render-target
+                        const p = document.createElement('p');
+                        const span = document.createElement('span');
+                        span.className = 'render-target';
+                        span.setAttribute('data-original-content', data.content);
+                        p.appendChild(span);
+                        
+                        // 找到插入段落的位置（如hr之后）
+                        const hr = lastAssistantMessage.querySelector('hr');
+                        if (hr) {
+                            hr.insertAdjacentElement('afterend', p);
+                        } else {
+                            lastAssistantMessage.appendChild(p);
+                        }
+                        
+                        renderMessageContent(lastAssistantMessage);
+                        lastAssistantMessage.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                        
+                        // 如果存在状态管理器，注册这个消息
+                        if (window.ChatState) {
+                            console.log('[WS] 注册流式AI消息到状态管理器');
+                            window.ChatState.registerMessage(
+                                'streaming-' + Date.now(), // 临时ID
+                                data.content,
+                                false, // 不是用户消息
+                                lastAssistantMessage
+                            );
+                        }
+                    } else {
+                        console.warn("[WS] 未找到render-target，无法更新内容");
+                    }
                 }
             } else {
-                 console.warn("Streaming update: No suitable assistant message found to append content.");
+                console.warn("[WS] 未找到合适的助手消息来附加内容");
             }
             return;
         }
