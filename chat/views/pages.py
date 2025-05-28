@@ -89,12 +89,13 @@ def settings_view(request):
 
 
     # 所有用户都可以访问设置页面，但内容会有所不同
-    providers = AIProvider.objects.all()
+    providers = []
     models = AIModel.objects.all()
     users = []
 
-    # 如果是管理员，还获取用户列表
+    # 如果是管理员，获取服务提供商和用户列表
     if is_admin:
+        providers = AIProvider.objects.all()
         for user in User.objects.all():
             try:
                 user_profile = user.profile

@@ -4,15 +4,20 @@ import requests
 import traceback
 import base64
 import mimetypes
+import asyncio
+import time
 
 from django.shortcuts import get_object_or_404
 from django.http import JsonResponse, HttpResponseBadRequest
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.contrib.auth.decorators import login_required
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
 
-from chat.models import AIProvider, AIModel, Conversation, Message
+from chat.models import AIProvider, AIModel, Conversation, Message # Ensure Message is imported
 from .utils import ensure_valid_api_url # Import from local utils
+from chat.consumers import STOP_GENERATION_FLAGS, SYNC_STOP_GENERATION_LOCK, update_stop_flag # 导入全局终止标志和同步锁
 
 logger = logging.getLogger(__name__)
 
@@ -132,8 +137,23 @@ data:{mime_type};base64,{base64_content}
             **model.default_params
         }
         
-        # 记录详细的请求信息
-        logger.info(f"尝试使用OpenAI格式发送带图片的消息到API: {api_url}")
+        # 检查是否有终止标志
+        with SYNC_STOP_GENERATION_LOCK:
+            stop_flag = STOP_GENERATION_FLAGS.get(str(conversation.id), False)
+            
+        if stop_flag:
+            logger.info(f"检测到会话 {conversation.id} 的终止标志，取消发送请求")
+            # 重置终止标志，这样用户可以再次尝试生成
+            update_stop_flag(conversation.id, False)
+            logger.info(f"已重置会话 {conversation.id} 的终止标志")
+            return JsonResponse({
+                'success': False,
+                'message': "生成已被用户终止"
+            })
+
+        # 记录请求信息（不包含敏感数据）
+        logger.info(f"发送请求到 {api_url}")
+        logger.info(f"请求模型: {model.model_name}")
         
         # 替换base64数据为提示，避免日志过大
         log_data = json.dumps(request_data)
@@ -427,6 +447,20 @@ def chat_api(request):
         api_url = ensure_valid_api_url(model.provider.base_url, "/v1/chat/completions")
         api_key = model.provider.api_key
 
+        # 检查是否有终止标志
+        with SYNC_STOP_GENERATION_LOCK:
+            stop_flag = STOP_GENERATION_FLAGS.get(str(conversation.id), False)
+            
+        if stop_flag:
+            logger.info(f"检测到会话 {conversation.id} 的终止标志，取消发送请求")
+            # 重置终止标志，这样用户可以再次尝试生成
+            update_stop_flag(conversation.id, False)
+            logger.info(f"已重置会话 {conversation.id} 的终止标志")
+            return JsonResponse({
+                'success': False,
+                'message': "生成已被用户终止"
+            })
+
         # 记录请求信息（不包含敏感数据）
         logger.info(f"发送请求到 {api_url}")
         logger.info(f"请求模型: {model.model_name}")
@@ -459,6 +493,20 @@ def chat_api(request):
                 try:
                     logger.info("开始处理流式响应")
                     for chunk in response.iter_lines():
+                        # 在每个块处理前检查终止标志
+                        with SYNC_STOP_GENERATION_LOCK:
+                            stop_flag = STOP_GENERATION_FLAGS.get(str(conversation.id), False)
+                        
+                        if stop_flag:
+                            logger.info(f"检测到会话 {conversation.id} 的终止标志，停止处理流式响应")
+                            # 立即退出函数，不进行任何后续处理
+                            update_stop_flag(conversation.id, False)
+                            logger.info(f"已重置会话 {conversation.id} 的终止标志")
+                            return JsonResponse({
+                                'success': False,
+                                'message': "生成已被用户终止"
+                            })
+                            
                         if not chunk:
                             continue
 
@@ -495,31 +543,87 @@ def chat_api(request):
 
                     logger.info(f"流式响应处理完成，累积内容长度: {len(full_content)}")
 
-                    # 如果没有内容，尝试非流式方式重试
+                    # 如果没有内容，在尝试非流式方式前先检查终止标志
                     if not full_content:
+                        # 再次检查终止标志
+                        with SYNC_STOP_GENERATION_LOCK:
+                            stop_flag = STOP_GENERATION_FLAGS.get(str(conversation.id), False)
+                        
+                        if stop_flag:
+                            logger.info(f"流式响应结束后，检测到会话 {conversation.id} 的终止标志，不进行非流式重试")
+                            update_stop_flag(conversation.id, False)
+                            logger.info(f"已重置会话 {conversation.id} 的终止标志")
+                            return JsonResponse({
+                                'success': False,
+                                'message': "生成已被用户终止"
+                            })
+                        
                         logger.warning("流式响应未提取到内容，尝试非流式方式")
-                        # 修改请求为非流式
-                        request_data['stream'] = False
-
-                        # 重新发送请求
-                        response = requests.post(
-                            api_url,
-                            json=request_data,
-                            headers=headers,
-                            timeout=60
-                        )
-
-                        if response.status_code == 200:
-                            response_data = response.json()
-                            logger.debug(f"非流式响应: {json.dumps(response_data)}")
-
-                            if 'choices' in response_data and len(response_data['choices']) > 0:
-                                if 'message' in response_data['choices'][0] and 'content' in response_data['choices'][0]['message']:
-                                    full_content = response_data['choices'][0]['message']['content']
-                                    logger.info(f"非流式方式成功提取内容，长度: {len(full_content)}")
+                        # 添加重试计数和延迟
+                        retry_count = 0
+                        max_retries = 2
+                        
+                        while not full_content and retry_count < max_retries:
+                            retry_count += 1
+                            logger.info(f"非流式重试 #{retry_count}/{max_retries}")
+                            
+                            # 每次重试前检查终止标志
+                            with SYNC_STOP_GENERATION_LOCK:
+                                stop_flag = STOP_GENERATION_FLAGS.get(str(conversation.id), False)
+                            
+                            if stop_flag:
+                                logger.info(f"非流式重试前检测到会话 {conversation.id} 的终止标志，停止重试")
+                                update_stop_flag(conversation.id, False)
+                                logger.info(f"已重置会话 {conversation.id} 的终止标志")
+                                return JsonResponse({
+                                    'success': False,
+                                    'message': "生成已被用户终止"
+                                })
+                            
+                            # 短暂延迟后重试
+                            time.sleep(1)
+                            
+                            # 修改请求为非流式
+                            request_data['stream'] = False
+                            
+                            try:
+                                # 重新发送请求
+                                response = requests.post(
+                                    api_url,
+                                    json=request_data,
+                                    headers=headers,
+                                    timeout=60
+                                )
+                                
+                                if response.status_code == 200:
+                                    response_data = response.json()
+                                    logger.debug(f"非流式响应: {json.dumps(response_data)}")
+                                    
+                                    if 'choices' in response_data and len(response_data['choices']) > 0:
+                                        if 'message' in response_data['choices'][0] and 'content' in response_data['choices'][0]['message']:
+                                            full_content = response_data['choices'][0]['message']['content']
+                                            logger.info(f"非流式方式成功提取内容，长度: {len(full_content)}")
+                                            break
+                            except Exception as retry_error:
+                                logger.error(f"非流式重试 #{retry_count} 出错: {str(retry_error)}")
+                                # 继续循环尝试下一次重试
                 except Exception as e:
                     logger.error(f"处理响应时出错: {str(e)}")
                     logger.error(f"详细错误: {traceback.format_exc()}")
+
+                # 再次检查终止标志，如果已终止则不保存结果
+                with SYNC_STOP_GENERATION_LOCK:
+                    stop_flag = STOP_GENERATION_FLAGS.get(str(conversation.id), False)
+                
+                if stop_flag:
+                    logger.info(f"检测到会话 {conversation.id} 的终止标志，取消保存回复")
+                    # 重置终止标志，这样用户可以再次尝试生成
+                    update_stop_flag(conversation.id, False)
+                    logger.info(f"已重置会话 {conversation.id} 的终止标志")
+                    return JsonResponse({
+                        'success': False,
+                        'message': "生成已被用户终止"
+                    })
 
                 if full_content:
                     # 保存AI回复
@@ -895,6 +999,20 @@ def regenerate_message_api(request):
             api_url = ensure_valid_api_url(model.provider.base_url, "/v1/chat/completions")
             api_key = model.provider.api_key
 
+            # 检查是否有终止标志
+            with SYNC_STOP_GENERATION_LOCK:
+                stop_flag = STOP_GENERATION_FLAGS.get(str(conversation.id), False)
+                
+            if stop_flag:
+                logger.info(f"检测到会话 {conversation.id} 的终止标志，取消重新生成请求")
+                # 重置终止标志，这样用户可以再次尝试生成
+                update_stop_flag(conversation.id, False)
+                logger.info(f"已重置会话 {conversation.id} 的终止标志")
+                return JsonResponse({
+                    'success': False,
+                    'message': "生成已被用户终止"
+                })
+
             # 发送请求到AI服务提供商
             headers = {
                 "Content-Type": "application/json",
@@ -919,6 +1037,20 @@ def regenerate_message_api(request):
                 try:
                     logger.info("开始处理流式响应 (重新生成)")
                     for chunk in response.iter_lines():
+                        # 在每个块处理前检查终止标志
+                        with SYNC_STOP_GENERATION_LOCK:
+                            stop_flag = STOP_GENERATION_FLAGS.get(str(conversation.id), False)
+                        
+                        if stop_flag:
+                            logger.info(f"检测到会话 {conversation.id} 的终止标志，停止处理流式响应")
+                            # 立即退出函数，不进行任何后续处理
+                            update_stop_flag(conversation.id, False)
+                            logger.info(f"已重置会话 {conversation.id} 的终止标志")
+                            return JsonResponse({
+                                'success': False,
+                                'message': "生成已被用户终止"
+                            })
+                            
                         if not chunk:
                             continue
 
@@ -933,13 +1065,33 @@ def regenerate_message_api(request):
 
                                 try:
                                     chunk_json = json.loads(chunk_data)
-                                    # 尝试提取内容
+                                    logger.debug(f"解析的JSON (重新生成): {json.dumps(chunk_json)}")
+
+                                    # --- More Robust Content Extraction ---
+                                    content_piece = None
                                     if 'choices' in chunk_json and len(chunk_json['choices']) > 0:
-                                        if 'delta' in chunk_json['choices'][0]:
-                                            delta = chunk_json['choices'][0]['delta']
-                                            if 'content' in delta and delta['content']:
-                                                content_piece = delta['content']
-                                                full_content += content_piece
+                                        choice = chunk_json['choices'][0]
+                                        if 'delta' in choice and 'content' in choice['delta'] and choice['delta']['content']:
+                                            content_piece = choice['delta']['content'] # OpenAI stream
+                                        elif 'message' in choice and 'content' in choice['message'] and choice['message']['content']:
+                                             # Handle case where a full message object arrives in a chunk
+                                             content_piece = choice['message']['content']
+                                             logger.warning("Received full message object in stream chunk (Regen)")
+                                    # Handle Anthropic-style content array in stream? (Less likely but possible)
+                                    elif 'content' in chunk_json and isinstance(chunk_json['content'], list):
+                                         text_contents = []
+                                         for item in chunk_json['content']:
+                                             if isinstance(item, dict) and item.get('type') == 'text' and 'text' in item:
+                                                 text_contents.append(item['text'])
+                                         if text_contents:
+                                             content_piece = ' '.join(text_contents)
+                                             logger.warning("Received Anthropic-style content array in stream chunk (Regen)")
+
+                                    if content_piece:
+                                        full_content += content_piece
+                                        logger.debug(f"提取的内容片段 (重新生成): {content_piece}")
+                                    # --- End Robust Extraction ---
+
                                 except json.JSONDecodeError as je:
                                     logger.error(f"JSON解析错误 (重新生成): {je}, 数据: {chunk_data}")
                         except Exception as e:
@@ -947,22 +1099,123 @@ def regenerate_message_api(request):
 
                     logger.info(f"流式响应处理完成 (重新生成)，累积内容长度: {len(full_content)}")
 
-                    # 如果没有内容，尝试非流式方式重试 (less likely needed now, but keep for robustness)
+                    # 如果没有内容，在尝试非流式方式前先检查终止标志
                     if not full_content:
+                        # 再次检查终止标志
+                        with SYNC_STOP_GENERATION_LOCK:
+                            stop_flag = STOP_GENERATION_FLAGS.get(str(conversation.id), False)
+                        
+                        if stop_flag:
+                            logger.info(f"流式响应结束后，检测到会话 {conversation.id} 的终止标志，不进行非流式重试 (重新生成)")
+                            update_stop_flag(conversation.id, False)
+                            logger.info(f"已重置会话 {conversation.id} 的终止标志")
+                            return JsonResponse({
+                                'success': False,
+                                'message': "生成已被用户终止"
+                            })
+                        
                         logger.warning("流式响应未提取到内容 (重新生成)，尝试非流式方式")
-                        request_data['stream'] = False
-                        response = requests.post(api_url, json=request_data, headers=headers, timeout=60)
-                        if response.status_code == 200:
-                            response_data = response.json()
-                            if 'choices' in response_data and len(response_data['choices']) > 0:
-                                if 'message' in response_data['choices'][0] and 'content' in response_data['choices'][0]['message']:
-                                    full_content = response_data['choices'][0]['message']['content']
-                                    logger.info(f"非流式方式成功提取内容 (重新生成)，长度: {len(full_content)}")
+                        # 添加重试计数和延迟
+                        retry_count = 0
+                        max_retries = 2
+                        
+                        while not full_content and retry_count < max_retries:
+                            retry_count += 1
+                            logger.info(f"重新生成非流式重试 #{retry_count}/{max_retries}")
+                            
+                            # 每次重试前检查终止标志
+                            with SYNC_STOP_GENERATION_LOCK:
+                                stop_flag = STOP_GENERATION_FLAGS.get(str(conversation.id), False)
+                            
+                            if stop_flag:
+                                logger.info(f"非流式重试前检测到会话 {conversation.id} 的终止标志，停止重试 (重新生成)")
+                                update_stop_flag(conversation.id, False)
+                                logger.info(f"已重置会话 {conversation.id} 的终止标志")
+                                return JsonResponse({
+                                    'success': False,
+                                    'message': "生成已被用户终止"
+                                })
+                            
+                            # 短暂延迟后重试
+                            time.sleep(1)
+                            
+                            # 修改请求为非流式
+                            request_data['stream'] = False
+                            
+                            try:
+                                # 重新发送请求
+                                response = requests.post(
+                                    api_url,
+                                    json=request_data,
+                                    headers=headers,
+                                    timeout=60
+                                )
+                                
+                                if response.status_code == 200:
+                                    response_data = response.json()
+                                    logger.debug(f"非流式响应 (重新生成): {json.dumps(response_data)}")
+                                    
+                                    # --- Use Robust Extraction for Non-Stream Fallback ---
+                                    extracted_content = ""
+                                    
+                                    if 'choices' in response_data and len(response_data['choices']) > 0:
+                                        choice = response_data['choices'][0]
+                                        if 'message' in choice and 'content' in choice['message']:
+                                            extracted_content = choice['message']['content']
+                                    elif 'content' in response_data: # Anthropic样式
+                                        if isinstance(response_data['content'], list):
+                                            text_contents = []
+                                            for item in response_data['content']:
+                                                if isinstance(item, dict) and item.get('type') == 'text' and 'text' in item:
+                                                    text_contents.append(item['text'])
+                                            if text_contents:
+                                                extracted_content = ' '.join(text_contents)
+                                        else:
+                                            extracted_content = str(response_data['content']) # 备用处理
+                                    
+                                    if extracted_content:
+                                        full_content = extracted_content
+                                        logger.info(f"非流式方式成功提取内容 (重新生成)，长度: {len(full_content)}")
+                                        break
+                                    # --- End Robust Extraction for Non-Stream ---
+                                else:
+                                    logger.error(f"非流式重试请求失败，状态码: {response.status_code}")
+                            except Exception as retry_error:
+                                logger.error(f"重新生成非流式重试 #{retry_count} 出错: {str(retry_error)}")
+                                # 继续循环尝试下一次重试
+                            
+                            if not full_content:
+                                logger.error("所有非流式重试也未能提取内容 (重新生成)")
                 except Exception as e:
                     logger.error(f"处理响应时出错 (重新生成): {str(e)}")
                     logger.error(f"详细错误: {traceback.format_exc()}")
 
+                # 再次检查终止标志，如果已终止则不保存结果
+                with SYNC_STOP_GENERATION_LOCK:
+                    stop_flag = STOP_GENERATION_FLAGS.get(str(conversation.id), False)
+                
+                if stop_flag:
+                    logger.info(f"检测到会话 {conversation.id} 的终止标志，取消保存重新生成的回复")
+                    # 重置终止标志，这样用户可以再次尝试生成
+                    update_stop_flag(conversation.id, False)
+                    logger.info(f"已重置会话 {conversation.id} 的终止标志")
+                    return JsonResponse({
+                        'success': False,
+                        'message': "生成已被用户终止"
+                    })
+
                 if full_content:
+                    # 再次检查终止标志
+                    with SYNC_STOP_GENERATION_LOCK:
+                        stop_flag = STOP_GENERATION_FLAGS.get(str(conversation.id), False)
+                    
+                    if stop_flag:
+                        logger.info(f"保存前检测到会话 {conversation.id} 的终止标志，不保存重新生成的回复")
+                        return JsonResponse({
+                            'success': False,
+                            'message': "生成已被用户终止"
+                        })
+                        
                     # 删除此用户消息之后的所有消息 (包括旧的AI回复)
                     Message.objects.filter(
                         conversation=conversation,
@@ -1326,3 +1579,288 @@ def debug_response_api(request):
             'success': False,
             'message': f"处理请求失败: {str(e)}"
         }, status=500)
+
+@login_required
+@csrf_exempt
+@require_http_methods(["POST"])
+def stop_generation_api(request):
+    """处理终止AI生成回复的请求"""
+    try:
+        data = json.loads(request.body)
+        conversation_id = data.get('conversation_id')
+        
+        if not conversation_id:
+            return JsonResponse({
+                'success': False,
+                'message': "缺少会话ID"
+            }, status=400)
+        
+        # 验证会话归属
+        try:
+            conversation = Conversation.objects.get(id=conversation_id, user=request.user)
+        except Conversation.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': "会话不存在或无权访问"
+            }, status=404)
+        
+        # 使用辅助函数设置全局终止标志
+        update_stop_flag(conversation_id, True)
+        
+        # 获取通道层并发送终止消息到WebSocket组
+        channel_layer = get_channel_layer()
+        conversation_group_name = f'chat_{conversation_id}'
+        
+        # 发送终止生成的消息到WebSocket组
+        async_to_sync(channel_layer.group_send)(
+            conversation_group_name,
+            {
+                'type': 'generation_stopped',
+                'message': '用户终止了生成'
+            }
+        )
+        
+        logger.info(f"用户 {request.user.username} 终止了会话 {conversation_id} 的AI回复生成 (通过API)")
+        
+        # --- Add logic to delete subsequent AI messages ---
+        try:
+            # Find the last user message in this conversation
+            last_user_message = Message.objects.filter(
+                conversation=conversation,
+                is_user=True
+            ).order_by('-timestamp').first()
+
+            if last_user_message:
+                # Delete AI messages created after the last user message
+                messages_to_delete = Message.objects.filter(
+                    conversation=conversation,
+                    is_user=False,
+                    timestamp__gt=last_user_message.timestamp
+                )
+                deleted_count = messages_to_delete.count()
+                if deleted_count > 0:
+                    messages_to_delete.delete()
+                    logger.info(f"API Stop: 已删除会话 {conversation_id} 中最后一条用户消息后的 {deleted_count} 条AI回复")
+                else:
+                    logger.info(f"API Stop: 会话 {conversation_id} 中最后一条用户消息后没有需要删除的AI回复")
+            else:
+                # Handle case where there might be no user messages yet (e.g., stopping very early)
+                # Delete ALL AI messages in this case? Or do nothing? Let's do nothing for now.
+                logger.warning(f"API Stop: 会话 {conversation_id} 中未找到用户消息，无法删除后续AI回复")
+
+        except Exception as delete_err:
+            logger.error(f"API Stop: 删除后续AI消息时出错: {str(delete_err)}")
+            # Log the error but still return success for the stop request itself
+        # --- End deletion logic ---
+
+        return JsonResponse({
+            'success': True,
+            'message': "已发送终止请求"
+        })
+    except Exception as e:
+        logger.error(f"处理终止生成请求时出错: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JsonResponse({
+            'success': False,
+            'message': f"处理请求时出错: {str(e)}"
+        }, status=500)
+
+@login_required
+@csrf_exempt
+@require_http_methods(["GET", "POST", "PUT", "DELETE"])
+def get_models_api(request):
+    """获取和管理AI模型 (管理员可管理，普通用户可查看活跃模型)"""
+    # 检查用户是否为管理员
+    is_admin = is_user_admin(request.user)
+
+    if request.method == 'GET':
+        # 获取单个模型详情 (对所有登录用户开放)
+        model_id = request.GET.get('id')
+        if model_id:
+            try:
+                model = get_object_or_404(AIModel, id=model_id)
+                # Optionally restrict if model or provider is inactive for non-admins
+                if not is_admin and (not model.is_active or not model.provider.is_active):
+                     return JsonResponse({'success': False, 'message': "模型不可用"}, status=404)
+
+                return JsonResponse({
+                    'models': [{ # Keep structure consistent with list view
+                        'id': model.id,
+                        'provider_id': model.provider.id,
+                        'provider_name': model.provider.name, # Add provider name
+                        'model_name': model.model_name,
+                        'display_name': model.display_name,
+                        'max_context': model.max_context,
+                        'max_history_messages': model.max_history_messages,
+                        'is_active': model.is_active,
+                        'default_params': model.default_params, # Include default params
+                    }]
+                })
+            except Exception as e:
+                logger.error(f"获取模型详情失败: {e}")
+                return JsonResponse({
+                    'success': False,
+                    'message': f"获取模型详情失败: {str(e)}"
+                }, status=400)
+
+        # 获取所有模型列表
+        if is_admin:
+            # 管理员可以看到所有模型
+            models = AIModel.objects.all().order_by('provider__name', 'display_name')
+        else:
+            # 普通用户只能看到活跃的模型
+            models = AIModel.objects.filter(is_active=True, provider__is_active=True).order_by('provider__name', 'display_name')
+
+        models_data = []
+        for model in models:
+            model_data = {
+                'id': model.id,
+                'model_name': model.model_name,
+                'display_name': model.display_name,
+                'max_context': model.max_context,
+                'max_history_messages': model.max_history_messages,
+                'is_active': model.is_active, # Include active status
+                'default_params': model.default_params, # Include default params
+            }
+            
+            # 只有管理员可以看到服务提供商的详细信息
+            if is_admin:
+                model_data['provider'] = model.provider.name
+                model_data['provider_id'] = model.provider.id
+            else:
+                # 普通用户只能看到服务提供商的名称，不能看到ID
+                model_data['provider'] = model.provider.name
+            
+            models_data.append(model_data)
+
+        return JsonResponse({'models': models_data})
+
+    # --- 以下操作需要管理员权限 ---
+    if not is_admin:
+        return JsonResponse({
+            'success': False,
+            'message': "权限不足，只有管理员可以管理AI模型"
+        }, status=403)
+
+    # 处理POST, PUT, DELETE请求
+    if request.method == 'POST':
+        # 添加新模型
+        try:
+            data = json.loads(request.body)
+            provider_id = data.get('provider_id')
+            model_name = data.get('model_name')
+            display_name = data.get('display_name')
+            max_context = data.get('max_context', 4096)
+            max_history_messages = data.get('max_history_messages', 20)
+            is_active = data.get('is_active', True)
+            default_params = data.get('default_params', {})
+            
+            if not provider_id or not model_name or not display_name:
+                return JsonResponse({
+                    'success': False,
+                    'message': "缺少必要参数 (provider_id, model_name, display_name)"
+                }, status=400)
+            
+            provider = get_object_or_404(AIProvider, id=provider_id)
+            
+            model = AIModel.objects.create(
+                provider=provider,
+                model_name=model_name,
+                display_name=display_name,
+                max_context=max_context,
+                max_history_messages=max_history_messages,
+                is_active=is_active,
+                default_params=default_params
+            )
+            
+            return JsonResponse({
+                'success': True,
+                'model_id': model.id,
+                'message': "模型已创建"
+            })
+        except Exception as e:
+            logger.error(f"添加模型失败: {str(e)}")
+            return JsonResponse({
+                'success': False,
+                'message': f"添加失败: {str(e)}"
+            }, status=400)
+    
+    elif request.method == 'PUT':
+        # 更新模型
+        try:
+            data = json.loads(request.body)
+            model_id = data.get('id')
+            
+            if not model_id:
+                return JsonResponse({
+                    'success': False,
+                    'message': "缺少模型ID"
+                }, status=400)
+            
+            model = get_object_or_404(AIModel, id=model_id)
+            
+            if 'provider_id' in data:
+                provider = get_object_or_404(AIProvider, id=data['provider_id'])
+                model.provider = provider
+            if 'model_name' in data:
+                model.model_name = data['model_name']
+            if 'display_name' in data:
+                model.display_name = data['display_name']
+            if 'max_context' in data:
+                model.max_context = data['max_context']
+            if 'max_history_messages' in data:
+                model.max_history_messages = data['max_history_messages']
+            if 'is_active' in data:
+                model.is_active = data['is_active']
+            if 'default_params' in data:
+                model.default_params = data['default_params']
+            
+            model.save()
+            
+            return JsonResponse({
+                'success': True,
+                'message': "模型已更新"
+            })
+        except Exception as e:
+            logger.error(f"更新模型失败: {str(e)}")
+            return JsonResponse({
+                'success': False,
+                'message': f"更新失败: {str(e)}"
+            }, status=400)
+    
+    elif request.method == 'DELETE':
+        # 删除模型
+        try:
+            data = json.loads(request.body)
+            model_id = data.get('id')
+            
+            if not model_id:
+                return JsonResponse({
+                    'success': False,
+                    'message': "缺少模型ID"
+                }, status=400)
+            
+            model = get_object_or_404(AIModel, id=model_id)
+            model.delete()
+            
+            return JsonResponse({
+                'success': True,
+                'message': "模型已删除"
+            })
+        except Exception as e:
+            logger.error(f"删除模型失败: {str(e)}")
+            return JsonResponse({
+                'success': False,
+                'message': f"删除失败: {str(e)}"
+            }, status=400)
+    
+    return HttpResponseBadRequest("不支持的请求方法")
+
+# 添加一个辅助函数来检查用户是否是管理员
+def is_user_admin(user):
+    """检查用户是否为管理员"""
+    try:
+        profile = user.profile
+        return profile.is_admin
+    except:
+        return False

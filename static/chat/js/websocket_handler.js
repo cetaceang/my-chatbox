@@ -4,8 +4,37 @@
 // WebSocket connection variable (will be initialized by initWebSocket)
 let chatSocket = null;
 
+// 跟踪终止状态
+let terminationConfirmSent = false;
+
+// 确保全局变量可用
+if (typeof window !== 'undefined') {
+    window.chatSocket = null;
+    window.terminationConfirmSent = false;
+}
+
+// 添加WebSocket状态描述函数
+function getWebSocketStateText(readyState) {
+    switch (readyState) {
+        case WebSocket.CONNECTING:
+            return "CONNECTING (0) - 连接中";
+        case WebSocket.OPEN:
+            return "OPEN (1) - 已连接";
+        case WebSocket.CLOSING:
+            return "CLOSING (2) - 关闭中";
+        case WebSocket.CLOSED:
+            return "CLOSED (3) - 已关闭";
+        default:
+            return "UNKNOWN (" + readyState + ") - 未知状态";
+    }
+}
+
 // Initialize WebSocket connection
 function initWebSocket() {
+    // 重置终止状态标志
+    window.terminationConfirmSent = false;
+    terminationConfirmSent = false;
+    
     // Get conversation ID from the global scope or data attribute if available
     // This assumes 'conversationId' is set globally by the Django template in chat_page.js or chat.html
     if (typeof conversationId === 'undefined' || !conversationId) {
@@ -25,34 +54,46 @@ function initWebSocket() {
     storeConversationId(conversationId);
     console.log("WebSocket Handler: Using conversation ID:", conversationId);
 
-    console.log("Attempting WebSocket connection: ws://" + window.location.host + "/ws/chat/" + conversationId + "/");
+    const wsUrl = 'ws://' + window.location.host + '/ws/chat/' + conversationId + '/';
+    console.log("Attempting WebSocket connection:", wsUrl);
+    
     // Close existing socket if trying to re-initialize
     if (chatSocket && chatSocket.readyState !== WebSocket.CLOSED) {
         console.log("Closing existing WebSocket connection before re-initializing.");
         chatSocket.close(1000, "Re-initializing connection"); // 1000 indicates normal closure
     }
 
-    chatSocket = new WebSocket(
-        'ws://' + window.location.host +
-        '/ws/chat/' + conversationId + '/');
+    try {
+        chatSocket = new WebSocket(wsUrl);
+        
+        // 确保全局变量可用
+        window.chatSocket = chatSocket;
+        
+        console.log("WebSocket对象已创建，当前状态:", getWebSocketStateText(chatSocket.readyState));
+    } catch (error) {
+        console.error("创建WebSocket对象时出错:", error);
+        chatSocket = null;
+        window.chatSocket = null;
+        return;
+    }
 
     chatSocket.onopen = function(e) {
-        console.log("WebSocket connection established");
+        console.log("WebSocket连接已建立，状态:", getWebSocketStateText(chatSocket.readyState));
     };
 
     chatSocket.onerror = function(e) {
-        console.error("WebSocket error:", e);
+        console.error("WebSocket错误:", e);
         // Add error hint, but don't show to user directly
-        console.log("WebSocket connection failed, will rely on HTTP API as fallback.");
+        console.log("WebSocket连接失败，将使用HTTP API作为备用方案。");
     };
 
     chatSocket.onclose = function(e) {
-        console.log("WebSocket connection closed", e.code, e.reason);
+        console.log("WebSocket连接已关闭", e.code, e.reason);
         // Add reconnection logic only if not a normal closure (code 1000)
         if (e.code !== 1000) {
-            console.log("WebSocket closed unexpectedly. Attempting to reconnect in 5 seconds...");
+            console.log("WebSocket意外关闭。5秒后尝试重新连接...");
             setTimeout(function() {
-                console.log("Attempting WebSocket reconnection...");
+                console.log("正在尝试WebSocket重新连接...");
                 initWebSocket(); // Retry connection
             }, 5000);
         }
@@ -122,6 +163,92 @@ function initWebSocket() {
         }
         // --- End New Conversation Handling ---
 
+        // Handle generation stopped message
+        if (data.type === 'generation_stopped') {
+            console.log("收到生成终止确认");
+            
+            // 检查是否已经处理过终止消息或正在处理终止请求
+            if (window.terminationConfirmSent || window.isTerminationInProgress) {
+                console.log("已经处理过终止消息或正在处理终止请求，忽略重复的终止确认");
+                return;
+            }
+            
+            // 标记已经处理过终止消息
+            window.terminationConfirmSent = true;
+            
+            // 立即清除所有加载指示器
+            const allLoadingIndicators = document.querySelectorAll('[id^="ai-response-loading-"]');
+            if (allLoadingIndicators.length > 0) {
+                console.log(`WebSocket终止：立即清除 ${allLoadingIndicators.length} 个加载指示器`);
+                allLoadingIndicators.forEach(indicator => {
+                    // 将加载指示器替换为终止消息
+                    const indicatorId = indicator.id;
+                    const match = indicatorId.match(/ai-response-loading-(.+)/);
+                    if (match && match[1]) {
+                        const userMessageId = match[1];
+                        if (typeof displayTerminationMessage === 'function') {
+                            displayTerminationMessage(userMessageId);
+                        } else {
+                            // 如果displayTerminationMessage未定义，简单移除指示器
+                            indicator.remove();
+                        }
+                    } else {
+                        indicator.remove();
+                    }
+                });
+            }
+            
+            // 重置所有活跃的重新生成按钮
+            const allRegenBtns = document.querySelectorAll('.regenerate-btn[data-regenerating="true"]');
+            if (allRegenBtns.length > 0) {
+                console.log(`WebSocket终止：重置 ${allRegenBtns.length} 个重新生成按钮`);
+                allRegenBtns.forEach(btn => {
+                    btn.removeAttribute('data-regenerating');
+                    btn.classList.remove('btn-processing');
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+                });
+            }
+            
+            // 隐藏终止按钮
+            if (typeof hideStopGenerationButton === 'function') {
+                hideStopGenerationButton();
+            } else {
+                const stopGenerationContainer = document.querySelector('#stop-generation-container');
+                if (stopGenerationContainer) {
+                    stopGenerationContainer.style.display = 'none';
+                }
+                
+                // 直接重置全局状态
+                window.isGeneratingResponse = false;
+                window.terminationRequestSent = false;
+                window.isTerminationInProgress = false;
+                console.log("WebSocket终止：已直接重置全局状态");
+            }
+            
+            // 检查是否已经显示了终止消息
+            const existingTerminationMessage = document.getElementById('ai-response-terminated');
+            if (!existingTerminationMessage) {
+                // 如果没有显示终止消息，则显示一个
+                console.log("未检测到已有终止消息，添加一个新的终止消息");
+                
+                // 查找并移除加载指示器
+                const loadingMessage = document.getElementById('ai-response-loading');
+                if (loadingMessage) {
+                    loadingMessage.remove();
+                }
+                
+                // 显示终止消息
+                if (typeof displayTerminationMessage === 'function') {
+                    displayTerminationMessage();
+                } else {
+                    console.warn("displayTerminationMessage函数未定义，无法显示终止消息");
+                }
+            } else {
+                console.log("已存在终止消息，不再重复显示");
+            }
+            return;
+        }
 
          // Handle streaming update
          if (data.update && data.content) {
@@ -231,6 +358,18 @@ function initWebSocket() {
              } else {
                   console.warn("ID update received, but no assistant message found to update.");
              }
+             
+             // 隐藏终止按钮，标记生成完成
+             if (typeof hideStopGenerationButton === 'function') {
+                 hideStopGenerationButton();
+             } else {
+                 const stopGenerationContainer = document.querySelector('#stop-generation-container');
+                 if (stopGenerationContainer) {
+                     stopGenerationContainer.style.display = 'none';
+                 }
+             }
+             window.isGeneratingResponse = false;
+             
              return;
         }
 
@@ -239,6 +378,24 @@ function initWebSocket() {
         // This might be less common if streaming is the primary method
         if (data.type === 'chat_message' && !data.is_user) { // Check type explicitly
             console.log("Received complete AI message via WebSocket:", data);
+
+            // 检查是否已显示终止消息
+            const terminationMessage = document.getElementById('ai-response-terminated');
+            if (terminationMessage || window.terminationConfirmSent) {
+                console.log("检测到终止消息已显示或已处理终止请求，不显示AI回复");
+                
+                // 隐藏终止按钮，标记生成完成
+                if (typeof hideStopGenerationButton === 'function') {
+                    hideStopGenerationButton();
+                } else {
+                    const stopGenerationContainer = document.querySelector('#stop-generation-container');
+                    if (stopGenerationContainer) {
+                        stopGenerationContainer.style.display = 'none';
+                    }
+                }
+                window.isGeneratingResponse = false;
+                return;
+            }
 
             // Remove any lingering loading indicator
             const waitingMessage = document.getElementById('ai-response-loading');
@@ -284,22 +441,51 @@ function initWebSocket() {
             messageContainer.appendChild(messageDiv);
             renderMessageContent(messageDiv); // Render the content
             messageDiv.scrollIntoView();
+            
+            // 隐藏终止按钮，标记生成完成
+            if (typeof hideStopGenerationButton === 'function') {
+                hideStopGenerationButton();
+            } else {
+                const stopGenerationContainer = document.querySelector('#stop-generation-container');
+                if (stopGenerationContainer) {
+                    stopGenerationContainer.style.display = 'none';
+                }
+            }
+            window.isGeneratingResponse = false;
         }
     };
 }
 
 // Function to send message via WebSocket
 function sendWebSocketMessage(message, modelId, tempId) {
-    if (chatSocket && chatSocket.readyState === WebSocket.OPEN) {
-        console.log("Sending message via WebSocket:", message);
+    // 首先检查全局chatSocket变量
+    if (typeof window.chatSocket !== 'undefined' && window.chatSocket) {
+        chatSocket = window.chatSocket; // 确保使用全局变量
+    }
+    
+    // 详细检查WebSocket状态
+    if (!chatSocket) {
+        console.warn("WebSocket对象不存在，无法发送消息");
+        return false;
+    }
+    
+    if (chatSocket.readyState !== WebSocket.OPEN) {
+        console.warn(`WebSocket未连接，当前状态: ${getWebSocketStateText(chatSocket.readyState)}`);
+        return false;
+    }
+    
+    // WebSocket已连接，发送消息
+    console.log("通过WebSocket发送消息:", message);
+    try {
         chatSocket.send(JSON.stringify({
             'message': message,
             'model_id': modelId,
             'temp_id': tempId
         }));
-        return true; // Indicate message was sent
-    } else {
-        console.log("WebSocket not open. Cannot send message.");
-        return false; // Indicate message was not sent
+        console.log("WebSocket消息发送成功");
+        return true; // 表示消息已发送
+    } catch (error) {
+        console.error("通过WebSocket发送消息时出错:", error);
+        return false; // 表示消息未发送
     }
 }

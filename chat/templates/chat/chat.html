@@ -53,6 +53,7 @@
                     </div>
                     <!-- 隐藏的文件上传控件 -->
                     <input type="file" id="file-upload" style="display: none">
+                    <!-- 移除独立的终止生成按钮容器 -->
                 </div>
             </div>
         </div>
@@ -76,7 +77,8 @@
 <script>
     // Set the global conversationId from Django template context
     // This needs to be defined BEFORE chat_page.js runs.
-    window.conversationId = {% if conversation %}"{{ conversation.id }}"{% else %}null{% endif %};
+    const conversationIdRaw = '{% if conversation %}{{ conversation.id }}{% else %}{% endif %}'; // Get ID as string or empty
+    window.conversationId = conversationIdRaw ? conversationIdRaw : null; // Assign string ID or null
     // Initialize tempIdMap globally so it's available to all modules
     window.tempIdMap = {};
 </script>

@@ -68,6 +68,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const uploadFileBtn = document.querySelector('#upload-file-btn');
     const fileUploadInput = document.querySelector('#file-upload');
     const fileUploadToast = document.querySelector('#file-upload-toast');
+    // 添加终止生成按钮元素
+    // const stopGenerationBtn = document.querySelector('#stop-generation-btn'); // Removed
+    // const stopGenerationContainer = document.querySelector('#stop-generation-container'); // Removed
+
+    // 全局变量，用于跟踪当前是否正在生成回复
+    window.isGeneratingResponse = false;
+    // 全局变量，用于跟踪终止状态
+    window.isTerminationInProgress = false; // Initialize flag
 
     // --- Initial Setup ---
     if (definitiveConversationId) {
@@ -95,6 +103,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const modelSelect = document.querySelector('#model-select');
     const messageContainer = document.querySelector('#message-container');
     const conversationList = document.querySelector('#conversation-list');
+
+    // --- REMOVED Listener for separate stop button ---
 
     // 文件上传按钮点击事件
     if (uploadFileBtn && fileUploadInput) {
@@ -606,31 +616,141 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    // Send Button Click
+    // Send / Stop Button Click Logic
     if (sendButton && messageInput && modelSelect) {
+        // let stopButtonClickTimeout = null; // REMOVED Debounce timeout variable
+
         sendButton.onclick = function() {
-            const message = messageInput.value.trim();
-            const modelId = modelSelect.value;
-            const isNewConversation = !window.conversationId; // Check if it's a new conversation BEFORE sending
+            // Check if the button is in 'stop' mode
+            if (sendButton.classList.contains('stop-mode')) {
+                // --- Stop Generation Logic ---
+                console.log("[Stop Click] Stop button clicked.");
 
-            // Allow sending if message is not empty AND (it's an existing conversation OR it's the first message of a new one)
-            if (message !== '' && (window.conversationId || isNewConversation)) {
-                console.log("Send button clicked. Message:", message, "Model:", modelId, "Is New:", isNewConversation);
+                // --- Simplified Debounce: Check flags and disabled state ---
+                if (sendButton.disabled || window.isTerminationInProgress) {
+                    console.log(`[Stop Click] Ignoring click. Disabled: ${sendButton.disabled}, Termination in progress: ${window.isTerminationInProgress}`);
+                    return; // Ignore if already disabled or termination started
+                }
+                // --- End Simplified Debounce ---
 
-                // If it's a new conversation, enable input/button temporarily if they were disabled
-                if (isNewConversation) {
-                    if (messageInput) messageInput.disabled = false;
-                    if (sendButton) sendButton.disabled = false;
+                // Disable button IMMEDIATELY and set termination flag
+                sendButton.disabled = true;
+                window.isTerminationInProgress = true;
+                console.log("[Stop Click] Button disabled, isTerminationInProgress set to true.");
+
+                // --- Get user message ID to pass to termination display ---
+                let userMessageIdForTermination = null;
+                // Find the *last* loading indicator (most likely the current one)
+                const indicators = document.querySelectorAll('[id^="ai-response-loading"]');
+                const currentIndicator = indicators.length > 0 ? indicators[indicators.length - 1] : null;
+
+                if (currentIndicator) {
+                     const indicatorId = currentIndicator.id;
+                     // Try to extract userMessageId from unique ID pattern
+                     const match = indicatorId.match(/ai-response-loading-(.+)/);
+                     if (match && match[1]) {
+                         userMessageIdForTermination = match[1];
+                         console.log(`[Stop Click] Found user ID from indicator ID: ${userMessageIdForTermination}`);
+                     } else {
+                         console.warn(`[Stop Click] Could not parse user ID from indicator ID: ${indicatorId}. Falling back.`);
+                         // Fallback: Find preceding user message div relative to the found indicator
+                         let associatedUserDiv = currentIndicator.previousElementSibling;
+                         while (associatedUserDiv && !associatedUserDiv.classList.contains('alert-primary')) {
+                             associatedUserDiv = associatedUserDiv.previousElementSibling;
+                         }
+                         if (associatedUserDiv) {
+                             userMessageIdForTermination = associatedUserDiv.getAttribute('data-message-id') || associatedUserDiv.getAttribute('data-temp-id');
+                             console.log(`[Stop Click] Found user ID from preceding element: ${userMessageIdForTermination}`);
+                         }
+                     }
+                }
+                if (!userMessageIdForTermination) {
+                     console.warn("[Stop Click] Could not determine userMessageId for displayTerminationMessage.");
+                     // Attempt to find the *last* user message as a final fallback
+                     const userMessages = document.querySelectorAll('.alert.alert-primary');
+                     if (userMessages.length > 0) {
+                         const lastUserMsg = userMessages[userMessages.length - 1];
+                         userMessageIdForTermination = lastUserMsg.getAttribute('data-message-id') || lastUserMsg.getAttribute('data-temp-id');
+                         console.log(`[Stop Click] Using last user message ID as fallback: ${userMessageIdForTermination}`);
+                     }
+                }
+                // --- End getting user message ID ---
+
+                // 立即显示终止提示 (Pass the ID)
+                displayTerminationMessage(userMessageIdForTermination);
+
+                // 发送终止请求
+                sendStopGenerationRequest(); // This function now also sets terminationRequestSent
+
+                // --- Mark the corresponding user message as having a stop requested ---
+                // Use the determined userMessageIdForTermination to find the correct user message
+                let userMessageToMark = null;
+                if (userMessageIdForTermination) {
+                    userMessageToMark = document.querySelector(`.alert.alert-primary[data-message-id="${userMessageIdForTermination}"], .alert.alert-primary[data-temp-id="${userMessageIdForTermination}"]`);
                 }
 
-                // Disable input/button during processing
-                messageInput.disabled = true;
-                sendButton.disabled = true;
-                sendButton.classList.add('btn-processing');
-                sendButton.innerHTML = '<i class="bi bi-arrow-clockwise animate-spin"></i>';
+                if (userMessageToMark) {
+                    userMessageToMark.setAttribute('data-stop-requested', 'true');
+                    console.log(`[Stop Click] Set data-stop-requested="true" for user message ${userMessageIdForTermination}.`);
+                } else {
+                    console.warn(`[Stop Click] Could not find user message element for ID ${userMessageIdForTermination} to mark stop requested.`);
+                    // Attempt to mark the last user message if ID failed
+                    const userMessages = document.querySelectorAll('.alert.alert-primary');
+                     if (userMessages.length > 0) {
+                         const lastUserMsg = userMessages[userMessages.length - 1];
+                         lastUserMsg.setAttribute('data-stop-requested', 'true');
+                         const fallbackId = lastUserMsg.getAttribute('data-message-id') || lastUserMsg.getAttribute('data-temp-id');
+                         console.log(`[Stop Click] Marked last user message (${fallbackId}) as stop requested (fallback).`);
+                     }
+                }
+                // --- End marking user message ---
 
-                // 生成临时ID
-                const tempId = 'temp-' + Date.now();
+                // --- Immediately reset any active regenerate button ---
+                // This makes the UI responsive immediately upon clicking Stop.
+                const activeRegenBtn = document.querySelector('.regenerate-btn[data-regenerating="true"]');
+                if (activeRegenBtn) {
+                    console.log("[Stop Click] Found active regenerate button. Resetting its state immediately.");
+                    activeRegenBtn.removeAttribute('data-regenerating');
+                    activeRegenBtn.classList.remove('btn-processing');
+                    activeRegenBtn.disabled = false;
+                    activeRegenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+                } else {
+                     console.log("[Stop Click] No active regenerate button found to reset immediately.");
+                }
+                // --- End immediate reset logic ---
+
+                // 隐藏/恢复按钮状态 (hideStopGenerationButton handles this)
+                // This resets the main Send/Stop button and global flags (isGeneratingResponse, isTerminationInProgress)
+                hideStopGenerationButton();
+
+            } else {
+                // --- Send Message Logic --- (Keep this part unchanged)
+                const message = messageInput.value.trim();
+                const modelId = modelSelect.value;
+                const isNewConversation = !window.conversationId; // Check if it's a new conversation BEFORE sending
+
+                // Allow sending if message is not empty AND (it's an existing conversation OR it's the first message of a new one)
+                if (message !== '' && (window.conversationId || isNewConversation)) {
+                    console.log("Send button clicked. Message:", message, "Model:", modelId, "Is New:", isNewConversation);
+
+                    // If it's a new conversation, enable input/button temporarily if they were disabled
+                    if (isNewConversation) {
+                        if (messageInput) messageInput.disabled = false;
+                        if (sendButton) sendButton.disabled = false;
+                    } // <-- Closing brace for if(isNewConversation)
+
+                    // --- Revised Order ---
+                    // 1. Mark generation starting
+                    window.isGeneratingResponse = true;
+                    // 2. Switch button to STOP mode (handles enabling/disabling based on termination state)
+                    showStopGenerationButton();
+                    // 3. Disable the input field
+                    messageInput.disabled = true;
+                    // --- End Revised Order ---
+                    // Redundant button disabling/styling removed as showStopGenerationButton handles it
+
+                    // 生成临时ID
+                    const tempId = 'temp-' + Date.now();
 
                 // 使用组件工厂创建用户消息
                 const userMessageDiv = window.MessageFactory.createUserMessage(tempId, message);
@@ -734,6 +854,10 @@ document.addEventListener("DOMContentLoaded", () => {
                                 renderMessageContent(aiMessageDiv);
                                 aiMessageDiv.scrollIntoView();
                             }
+                            
+                            // 隐藏终止按钮，标记生成完成
+                            hideStopGenerationButton();
+                            window.isGeneratingResponse = false;
                         } else {
                             console.error("API错误:", data.message);
                             // 如果创建新对话失败，重置conversationId
@@ -747,6 +871,10 @@ document.addEventListener("DOMContentLoaded", () => {
                                 messageContainer.appendChild(errorDiv);
                                 errorDiv.scrollIntoView();
                             }
+                            
+                            // 隐藏终止按钮，标记生成完成
+                            hideStopGenerationButton();
+                            window.isGeneratingResponse = false;
                         }
                     })
                     .catch(error => {
@@ -759,26 +887,27 @@ document.addEventListener("DOMContentLoaded", () => {
                             messageContainer.appendChild(errorDiv);
                             errorDiv.scrollIntoView();
                         }
+                        
+                        // 隐藏终止按钮，标记生成完成
+                        hideStopGenerationButton();
+                        window.isGeneratingResponse = false;
                     })
                     .finally(() => {
-                        // 无论API成功或失败都重新启用输入/按钮
+                        // 无论API成功或失败都重新启用输入
                         messageInput.value = '';
                         messageInput.disabled = false;
-                        sendButton.disabled = false;
-                        sendButton.classList.remove('btn-processing');
-                        sendButton.innerHTML = '<i class="bi bi-send"></i>';
                         messageInput.focus();
+                        // Button state is handled by hideStopGenerationButton called in .then/.catch
                     });
                 } else {
-                    // 如果通过WebSocket发送，立即重新启用UI
+                    // 如果通过WebSocket发送，立即重新启用UI (Input only, button state managed by show/hide)
                     messageInput.value = '';
                     messageInput.disabled = false;
-                    sendButton.disabled = false;
-                    sendButton.classList.remove('btn-processing');
-                    sendButton.innerHTML = '<i class="bi bi-send"></i>';
+                    // sendButton state is handled by show/hideStopGenerationButton
                     messageInput.focus();
-                }
-            } else if (message === '') {
+                } // <-- Closing brace for if (!sentViaWebSocket)
+            } // <-- **ADDED Missing closing brace for the main message sending logic block: if (message !== '' && (window.conversationId || isNewConversation))**
+            else if (message === '') { // Now this else if correctly follows the closed 'if' block
                 // 处理空消息情况
                 console.log("消息输入为空");
             } else if (!window.conversationId && !isNewConversation) {
@@ -786,7 +915,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 console.error("状态不一致: 没有对话ID且未标记为新对话");
                 alert("出现错误，请刷新页面");
             }
-        };
+        } // <-- **ADDED Missing closing brace for the 'else' block (Send Message Logic)**
+    }; // Closes sendButton.onclick = function()
     } else {
          console.warn("Send button, message input, or model select not found.");
     }
@@ -1309,3 +1439,264 @@ function saveMessageToServer(messageId, content, isUser) {
         return false;
     });
 }
+
+// Function to switch Send button to Stop mode
+function showStopGenerationButton() {
+    const sendButton = document.querySelector('#send-button');
+    if (sendButton) {
+        console.log("切换到停止模式");
+        sendButton.classList.add('stop-mode', 'btn-danger'); // Add stop-mode and danger color
+        sendButton.classList.remove('btn-primary'); // Remove primary color
+        sendButton.innerHTML = '<i class="bi bi-stop-fill"></i>'; // Change icon (using stop-fill)
+        sendButton.title = "终止生成"; // Update tooltip
+
+        // 简化状态管理 - 只用一个主要标志
+        window.isGeneratingResponse = true;
+
+        // 只有在终止未进行时才启用按钮
+        if (!window.isTerminationInProgress) {
+            sendButton.disabled = false;
+            window.terminationRequestSent = false;
+        } else {
+            console.log("显示停止按钮时检测到终止已在进行中，保持按钮禁用状态");
+            sendButton.disabled = true;
+        }
+
+        // 禁用所有重新生成按钮，除非它们已经在处理中
+        const allRegenBtns = document.querySelectorAll('.regenerate-btn');
+        allRegenBtns.forEach(btn => {
+            if (!btn.classList.contains('btn-processing')) {
+                btn.disabled = true;
+            }
+        });
+        console.log(`[showStopGenerationButton] 已禁用 ${allRegenBtns.length} 个重新生成按钮`);
+    } else {
+        console.warn("找不到发送/停止按钮");
+    }
+}
+
+// Function to switch Stop button back to Send mode
+function hideStopGenerationButton() {
+    const sendButton = document.querySelector('#send-button');
+    console.log(`[hideStopGenerationButton] 被调用. isTerminationInProgress = ${window.isTerminationInProgress}`);
+    
+    if (sendButton) {
+        console.log("恢复到发送模式");
+        sendButton.classList.remove('stop-mode', 'btn-danger');
+        sendButton.classList.add('btn-primary');
+        sendButton.innerHTML = '<i class="bi bi-send"></i>';
+        sendButton.title = "发送消息";
+        sendButton.disabled = false;
+
+        // 简化状态管理 - 一次性重置所有状态标志
+        window.isGeneratingResponse = false;
+        window.terminationRequestSent = false;
+        window.isTerminationInProgress = false;
+        console.log("[hideStopGenerationButton] 已重置所有状态标志");
+
+        // 清除所有用户消息上的终止请求标志
+        const messageContainer = document.querySelector('#message-container');
+        if (messageContainer) {
+            const userMessages = messageContainer.querySelectorAll('.alert.alert-primary[data-stop-requested="true"]');
+            console.log(`[hideStopGenerationButton] 找到 ${userMessages.length} 条带有data-stop-requested的用户消息。正在清除标志。`);
+            userMessages.forEach(msgDiv => {
+                msgDiv.removeAttribute('data-stop-requested');
+                const msgId = msgDiv.getAttribute('data-message-id') || msgDiv.getAttribute('data-temp-id');
+                console.log(`  - 已清除消息 ${msgId} 的标志`);
+            });
+        }
+
+        // 启用所有非处理中的重新生成按钮
+        const allRegenBtns = document.querySelectorAll('.regenerate-btn');
+        allRegenBtns.forEach(btn => {
+            if (!btn.classList.contains('btn-processing')) {
+                btn.disabled = false;
+            }
+        });
+        console.log(`[hideStopGenerationButton] 已启用 ${allRegenBtns.length} 个重新生成按钮（不包括仍在处理的按钮）`);
+    } else {
+        console.warn("找不到发送/停止按钮");
+    }
+}
+
+// 添加发送终止生成请求的函数
+function sendStopGenerationRequest() {
+    if (!window.conversationId) {
+        console.warn("没有有效的对话ID，无法发送终止请求");
+        return;
+    }
+    
+    // 检查是否已经发送过终止请求
+    if (window.terminationRequestSent) {
+        console.log("已经发送过终止请求，不再重复发送");
+        return;
+    }
+    
+    // 标记已经发送过终止请求和正在处理终止请求
+    window.terminationRequestSent = true;
+    window.isTerminationInProgress = true;
+    
+    console.log(`正在发送终止生成请求，对话ID: ${window.conversationId}`);
+    
+    // 立即清除所有加载指示器
+    const allLoadingIndicators = document.querySelectorAll('[id^="ai-response-loading-"]');
+    if (allLoadingIndicators.length > 0) {
+        console.log(`立即清除 ${allLoadingIndicators.length} 个加载指示器`);
+        allLoadingIndicators.forEach(indicator => {
+            // 将加载指示器替换为终止消息
+            const indicatorId = indicator.id;
+            const match = indicatorId.match(/ai-response-loading-(.+)/);
+            if (match && match[1]) {
+                const userMessageId = match[1];
+                displayTerminationMessage(userMessageId);
+            } else {
+                indicator.remove();
+            }
+        });
+    }
+    
+    // 检查WebSocket连接
+    let websocketSent = false;
+    if (typeof window.chatSocket !== 'undefined' && window.chatSocket && window.chatSocket.readyState === WebSocket.OPEN) {
+        console.log("通过WebSocket发送终止生成请求");
+        try {
+            window.chatSocket.send(JSON.stringify({
+                'type': 'stop_generation'
+            }));
+            websocketSent = true;
+            console.log("WebSocket终止请求已发送");
+        } catch (error) {
+            console.error("通过WebSocket发送终止请求时出错:", error);
+        }
+    } else {
+        console.warn("WebSocket不可用或未连接，无法通过WebSocket发送终止请求");
+        if (typeof window.chatSocket === 'undefined') {
+            console.warn("  原因: chatSocket未定义");
+        } else if (!window.chatSocket) {
+            console.warn("  原因: chatSocket为null");
+        } else {
+            console.warn(`  原因: chatSocket状态为 ${window.chatSocket.readyState} (OPEN=${WebSocket.OPEN})`);
+        }
+    }
+    
+    // 始终通过HTTP API发送请求作为备份
+    fetch('/chat/api/stop_generation/', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCookie('csrftoken')
+        },
+        body: JSON.stringify({
+            'conversation_id': window.conversationId
+        })
+    })
+    .then(response => {
+        if (!response.ok) {
+            throw new Error(`HTTP错误: ${response.status}`);
+        }
+        return response.json();
+    })
+    .then(data => {
+        console.log("终止生成请求响应:", data);
+        if (!data.success) {
+            console.warn("终止生成请求失败:", data.message);
+        } else {
+            console.log("终止生成请求成功");
+        }
+    })
+    .catch(error => {
+        console.error("发送终止生成请求时出错:", error);
+    });
+}
+
+// 显示终止消息提示 (Now accepts userMessageId)
+function displayTerminationMessage(userMessageId) {
+    // Construct the unique ID to find the correct loading indicator
+    const uniqueIndicatorId = userMessageId ? `ai-response-loading-${userMessageId}` : null;
+    console.log(`[displayTerminationMessage] Looking for indicator with ID: ${uniqueIndicatorId}`);
+
+    let loadingMessage = null;
+    if (uniqueIndicatorId) {
+        loadingMessage = document.getElementById(uniqueIndicatorId);
+    }
+
+    // If specific ID wasn't found OR no ID was provided, try the generic fallback selector
+    if (!loadingMessage) {
+         console.warn(`[displayTerminationMessage] Indicator with specific ID "${uniqueIndicatorId}" not found or ID not provided. Trying fallback selector '[id^="ai-response-loading-"]'.`);
+         loadingMessage = document.querySelector('[id^="ai-response-loading-"]'); // Find *any* loading indicator starting with the prefix
+         if (loadingMessage) {
+             console.log(`[displayTerminationMessage] Found indicator using fallback selector: ${loadingMessage.id}`);
+         } else {
+             // Log an error if no indicator is found at all
+             console.error(`[displayTerminationMessage] Failed to find any loading indicator using specific ID "${uniqueIndicatorId}" or fallback selector.`);
+         }
+    } else {
+         // Log success if found by specific ID
+         console.log(`[displayTerminationMessage] Found indicator using specific ID: ${loadingMessage.id}`);
+    }
+
+
+    if (loadingMessage) {
+        const foundId = loadingMessage.id; // Get the actual ID found
+        console.log(`[displayTerminationMessage] Replacing indicator ${foundId} with termination message.`);
+        // 替换加载指示器为终止消息
+        // Keep a unique ID for the termination message too, using the original userMessageId if available
+        loadingMessage.id = `ai-response-terminated-${userMessageId || 'unknown'}`;
+        loadingMessage.innerHTML = `
+            <div class="d-flex justify-content-between">
+                <span>系统</span>
+                <small>${new Date().toLocaleTimeString()}</small>
+            </div>
+            <hr>
+            <p>生成已被用户终止</p>
+        `;
+        loadingMessage.className = 'alert alert-warning';
+        
+        // 5秒后自动消失
+        setTimeout(() => {
+            if (loadingMessage.parentNode) {
+                loadingMessage.style.opacity = '0';
+                loadingMessage.style.transition = 'opacity 0.5s ease';
+                setTimeout(() => {
+                    if (loadingMessage.parentNode) {
+                        loadingMessage.remove();
+                    }
+                }, 500);
+            }
+        }, 5000);
+    } else {
+        // 如果找不到加载消息，创建一个新的终止消息
+        const messageContainer = document.querySelector('#message-container');
+        if (messageContainer) {
+            const terminationDiv = document.createElement('div');
+            terminationDiv.className = 'alert alert-warning';
+            terminationDiv.id = 'ai-response-terminated';
+            terminationDiv.innerHTML = `
+                <div class="d-flex justify-content-between">
+                    <span>系统</span>
+                    <small>${new Date().toLocaleTimeString()}</small>
+                </div>
+                <hr>
+                <p>生成已被用户终止</p>
+            `;
+            messageContainer.appendChild(terminationDiv);
+            terminationDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            
+            // 5秒后自动消失
+            setTimeout(() => {
+                if (terminationDiv.parentNode) {
+                    terminationDiv.style.opacity = '0';
+                    terminationDiv.style.transition = 'opacity 0.5s ease';
+                    setTimeout(() => {
+                        if (terminationDiv.parentNode) {
+                            terminationDiv.remove();
+                        }
+                    }, 500);
+                }
+            }, 5000);
+        }
+    }
+}
+
+// 将displayTerminationMessage设为全局函数
+window.displayTerminationMessage = displayTerminationMessage;

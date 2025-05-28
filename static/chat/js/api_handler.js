@@ -1,6 +1,9 @@
 /* eslint-env browser */
 /* globals getCookie, getStoredConversationId, storeConversationId, escapeHtml, renderMessageContent, getRealMessageId, tempIdMap, conversationId */ // Inform linter about globals
 
+// Global variable to track the ID of the message currently being regenerated
+window.regeneratingMessageId = null;
+
 // From服务器同步会话数据
 function syncConversationData(forceRefresh = false) {
     // Use the globally available conversationId or fallback to stored ID
@@ -614,10 +617,88 @@ function saveMessageEdit(messageId, newContent, messageDiv, originalHTML) {
     });
 }
 
+/**
+ * 检查指定消息是否请求了终止生成
+ * @param {string} messageId - 要检查的消息ID
+ * @return {boolean} - 如果消息请求了终止则返回true
+ */
+function isStopRequestedForMessage(messageId) {
+    if (!messageId) return false;
+    
+    // 查找用户消息元素，支持临时ID和正式ID
+    const userDiv = document.querySelector(`.alert[data-message-id="${messageId}"], .alert[data-temp-id="${messageId}"]`);
+    if (!userDiv) return false;
+    
+    // 检查是否设置了终止请求标志
+    return userDiv.getAttribute('data-stop-requested') === 'true';
+}
 
 // 重新生成AI回复
 function regenerateResponse(userMessageId) {
-    console.log("Initiating regeneration for user message ID:", userMessageId);
+    console.log(`[Regen Start ${userMessageId}] 开始执行。`);
+
+    // 安全检查：确保有效的消息ID
+    if (!userMessageId) {
+        console.error("无法重新生成：消息ID无效");
+        return;
+    }
+
+    // 如果已经在处理终止，不启动新的生成
+    if (window.isTerminationInProgress) {
+        console.log(`[Regen Start ${userMessageId}] 终止正在进行中，不启动新的生成`);
+        return;
+    }
+
+    // Declare userMessageDiv ONCE at the beginning
+    const userMessageDiv = document.querySelector(`.alert[data-message-id="${userMessageId}"], .alert[data-temp-id="${userMessageId}"]`);
+    if (!userMessageDiv) {
+        console.error(`[Regen Start ${userMessageId}] Could not find user message div.`);
+        return;
+    }
+
+    // --- Check if a stop was requested specifically for THIS message ---
+    // This check remains important in case the stop happened *before* this function was called
+    if (userMessageDiv.getAttribute('data-stop-requested') === 'true') {
+        console.warn(`[Regen Start ${userMessageId}] Blocked: Stop was previously requested for this specific message.`);
+        displaySystemError("此消息的停止请求正在处理中...", userMessageDiv); // More specific error
+        return; // Prevent regeneration from starting
+    }
+    // --- End specific stop check ---
+
+    const regenBtn = userMessageDiv.querySelector('.regenerate-btn'); // Use the existing userMessageDiv
+    if (!regenBtn) {
+        console.error("Could not find regenerate button for message ID:", userMessageId);
+        return;
+    }
+
+    // --- Prevent starting if already regenerating (check button attribute) ---
+    console.log(`[Regen Check ${userMessageId}] Checking data-regenerating attribute. Current value:`, regenBtn.getAttribute('data-regenerating'));
+    if (regenBtn.getAttribute('data-regenerating') === 'true') {
+        console.warn(`[Regen Check ${userMessageId}] Blocked: Regeneration for message ID ${userMessageId} is already in progress (button state). Ignoring duplicate request.`);
+        displaySystemError("请稍候，上一次请求仍在处理中...", userMessageDiv); // Show brief error
+        // No need to reset button here, the existing process's finally block should handle it.
+        return; // Stop execution
+    }
+    // --- End prevention check ---
+
+    // Clear any previous stop request flag for this message before starting
+    userMessageDiv.removeAttribute('data-stop-requested');
+    console.log(`[Regen Start ${userMessageId}] Cleared data-stop-requested attribute.`);
+
+    // Mark button as regenerating and disable
+    regenBtn.setAttribute('data-regenerating', 'true');
+    console.log(`[Regen Start ${userMessageId}] Set data-regenerating="true".`);
+    regenBtn.classList.add('btn-processing'); // Add spinner class
+    regenBtn.disabled = true;
+    regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise animate-spin"></i>'; // Show spinner
+
+    // --- Set global generating flag ---
+    window.isGeneratingResponse = true; // Mark that *a* generation process has started
+    console.log(`[Regen Start ${userMessageId}] Set window.isGeneratingResponse = true.`);
+    // --- End setting global flag ---
+
+    console.log(`[Regen Start ${userMessageId}] Proceeding with regeneration for user message ID: ${userMessageId}`);
+
     const modelSelect = document.querySelector('#model-select');
     if (!modelSelect) {
          console.error("Model select dropdown not found.");
@@ -665,14 +746,23 @@ function regenerateResponse(userMessageId) {
     const messageContainer = document.querySelector('#message-container');
     if (!messageContainer) {
         console.error("Message container not found.");
+        // Restore button state before returning
+        if (regenBtn) {
+            regenBtn.removeAttribute('data-regenerating');
+            regenBtn.classList.remove('btn-processing');
+            regenBtn.disabled = false;
+            regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+        }
         return;
     }
 
-    // Find the user message div using the real ID
-    const userMessageDiv = messageContainer.querySelector(`.alert[data-message-id="${realUserMessageId}"]`);
-    if (!userMessageDiv) {
-        console.error("Could not find user message div for ID:", realUserMessageId);
-        // Maybe the message was deleted?
+    // --- REMOVED Redundant declaration of userMessageDiv ---
+    // We already declared userMessageDiv at the top using the initial userMessageId.
+    // If it was a temp ID, realUserMessageId will be updated, but userMessageDiv element remains the same.
+    // We just need to ensure the element still exists after potential async operations.
+    if (!document.body.contains(userMessageDiv)) {
+         console.error("User message div no longer exists in DOM after resolving ID for:", realUserMessageId);
+         // Button state might already be reset by finally, or was never set if temp ID failed early
         return;
     }
 
@@ -693,66 +783,223 @@ function regenerateResponse(userMessageId) {
     console.log(`Removing ${messagesToRemove.length} subsequent AI message(s).`);
     messagesToRemove.forEach(msg => msg.remove());
 
-    // Add loading indicator
-    const loadingDiv = createLoadingIndicator();
+    // Add loading indicator FIRST with unique ID
+    const uniqueIndicatorId = `ai-response-loading-${userMessageId}`;
+    const loadingDiv = createLoadingIndicator(uniqueIndicatorId); // Pass ID
     userMessageDiv.insertAdjacentElement('afterend', loadingDiv);
     loadingDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-    // Send regeneration request
-    console.log("Sending regeneration request for message ID:", realUserMessageId);
-    fetch('/chat/api/messages/regenerate/', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': getCookie('csrftoken')
-        },
-        body: JSON.stringify({ 'message_id': realUserMessageId, 'model_id': modelId })
-    })
-    .then(response => {
-        console.log("Regeneration response status:", response.status);
-        if (!response.ok) {
-            return response.text().then(text => { throw new Error(`HTTP error ${response.status}: ${text}`); });
-        }
-        return response.json();
-    })
-    .then(data => {
-        console.log("Regeneration response data:", data);
-        // Remove loading indicator
-        loadingDiv.remove();
+    // THEN Show the stop button
+    if (typeof showStopGenerationButton === 'function') {
+        console.log("显示重新生成时的终止按钮");
+        showStopGenerationButton();
+    } else {
+        console.warn("找不到showStopGenerationButton函数");
+        // 应急处理，设置基本状态标志
+        window.isGeneratingResponse = true;
+        window.terminationRequestSent = false;
+        window.isTerminationInProgress = false;
+    }
 
-        if (data.success) {
-            console.log("Regeneration successful, new message ID:", data.message_id);
-            // Add the new AI message
-            const aiMessageDiv = createAIMessageDiv(data.content, data.message_id, data.timestamp);
-            userMessageDiv.insertAdjacentElement('afterend', aiMessageDiv);
-            renderMessageContent(aiMessageDiv); // Render the new message
-            aiMessageDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        } else {
-            console.error("Regeneration failed:", data.message);
-            displaySystemError(`重新生成回复失败: ${data.message}`, userMessageDiv); // Display error after user msg
-        }
-    })
-    .catch(error => {
-        console.error('Error regenerating response:', error);
-        loadingDiv.remove(); // Ensure loading indicator is removed on error
-        displaySystemError(`重新生成回复时出错: ${error.message}`, userMessageDiv); // Display error after user msg
-    })
-    .finally(() => {
-         // Restore regenerate button state (assuming it was disabled)
-         const regenBtn = userMessageDiv.querySelector('.regenerate-btn');
-         if (regenBtn) {
-              regenBtn.classList.remove('btn-processing');
-              regenBtn.disabled = false;
-              regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
-         }
-    });
+    // 发送重新生成请求
+    console.log("发送重新生成请求，消息ID:", realUserMessageId);
+    
+    // 增加重试机制
+    const maxRetries = 2;
+    let retryCount = 0;
+    
+    function sendRegenerateRequest() {
+        fetch('/chat/api/messages/regenerate/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            },
+            body: JSON.stringify({
+                'message_id': realUserMessageId,
+                'model_id': modelId  // 添加必要的model_id参数
+            })
+        })
+        .then(response => {
+            if (!response.ok) {
+                const error = new Error(`HTTP错误: ${response.status}`);
+                error.status = response.status;
+                throw error;
+            }
+            return response.json();
+        })
+        .then(data => {
+            console.log("重新生成响应数据:", data);
+            
+            // 检查是否终止
+            const stopRequestedForThis = isStopRequestedForMessage(userMessageId);
+            if (window.isTerminationInProgress || stopRequestedForThis) {
+                console.log(`[Regen Success ${userMessageId}] 忽略响应。终止进行中: ${window.isTerminationInProgress}, 此消息请求终止: ${stopRequestedForThis}`);
+                
+                // 如果没有其他活跃的重新生成，隐藏停止按钮
+                if (!document.querySelector('.regenerate-btn[data-regenerating="true"]')) {
+                    console.log(`[Regen Success ${userMessageId}] 没有其他活跃的重新生成。调用hideStopGenerationButton。`);
+                    if (typeof hideStopGenerationButton === 'function') hideStopGenerationButton();
+                }
+                return;
+            }
+            
+            // 处理成功响应
+            if (data.success) {
+                console.log(`[Regen Success ${userMessageId}] Rendering new message ID: ${data.message_id}`);
+                const aiMessageDiv = createAIMessageDiv(data.content, data.message_id, data.timestamp);
+                // Ensure userMessageDiv still exists before inserting after it
+                if (document.body.contains(userMessageDiv)) {
+                    userMessageDiv.insertAdjacentElement('afterend', aiMessageDiv);
+                    renderMessageContent(aiMessageDiv); // Render the new message
+                    aiMessageDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                } else {
+                     console.warn(`[Regen Success ${userMessageId}] User message div disappeared before AI response could be inserted.`);
+                }
+            } else {
+                // Handle backend errors (e.g., explicit termination message from API, other errors)
+                console.error(`[Regen Fail ${userMessageId}] Regeneration failed: ${data.message}`);
+                // Display error ONLY IF it's not a user termination message from the API itself
+                if (data.message !== '生成已被用户终止') {
+                    displaySystemError(`重新生成回复失败: ${data.message}`, userMessageDiv);
+                } else {
+                    console.log(`[Regen Fail ${userMessageId}] Regeneration terminated by user (API response). Skipping system error display.`);
+                    
+                    // 特殊处理服务器返回的"生成已被用户终止"消息
+                    console.log(`[Regen Fail ${userMessageId}] 收到生成被终止的消息，强制重置所有状态`);
+                    
+                    // 清除任何活跃的重新生成标志
+                    const allRegenBtns = document.querySelectorAll('.regenerate-btn[data-regenerating="true"]');
+                    allRegenBtns.forEach(btn => {
+                        btn.removeAttribute('data-regenerating');
+                        btn.classList.remove('btn-processing');
+                        btn.disabled = false;
+                        btn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+                    });
+                    
+                    // 使用hideStopGenerationButton重置所有状态
+                    if (typeof hideStopGenerationButton === 'function') {
+                        hideStopGenerationButton();
+                    } else {
+                        // 备用方案：直接重置状态变量
+                        window.isGeneratingResponse = false;
+                        window.terminationRequestSent = false;
+                        window.isTerminationInProgress = false;
+                        console.log(`[Regen Fail ${userMessageId}] 已强制重置状态变量`);
+                    }
+                    
+                    // 移除加载指示器
+                    const uniqueIndicatorId = `ai-response-loading-${userMessageId}`;
+                    const loadingIndicator = document.getElementById(uniqueIndicatorId);
+                    if (loadingIndicator && loadingIndicator.parentNode) {
+                        loadingIndicator.remove();
+                    }
+                    
+                    // 提前返回，不执行后续检查
+                    return;
+                }
+            }
+            
+            // 检查是否还有其他活跃的重新生成
+            if (!document.querySelector('.regenerate-btn[data-regenerating="true"]:not([data-message-id="' + userMessageId + '"])')) {
+                console.log(`[Regen Success/Fail ${userMessageId}] 没有其他活跃的重新生成。调用hideStopGenerationButton。`);
+                if (typeof hideStopGenerationButton === 'function') hideStopGenerationButton();
+            } else {
+                console.log(`[Regen Success/Fail ${userMessageId}] 其他重新生成仍然活跃。保持停止按钮可见。`);
+            }
+        })
+        .catch(error => {
+            console.error('重新生成响应出错:', error);
+            
+            // 重试逻辑
+            if (retryCount < maxRetries && !window.isTerminationInProgress) {
+                retryCount++;
+                console.log(`重新生成请求失败，尝试重试 #${retryCount}/${maxRetries}`);
+                setTimeout(() => {
+                    sendRegenerateRequest();
+                }, 1000 * retryCount); // 每次重试增加延迟
+                return;
+            }
+            
+            console.log(`[regenerateResponse .catch] 捕获错误。isTerminationInProgress = ${window.isTerminationInProgress}`);
+            
+            // 移除加载指示器
+            const uniqueIndicatorId = `ai-response-loading-${userMessageId}`;
+            const loadingIndicator = document.getElementById(uniqueIndicatorId);
+            if (loadingIndicator) {
+                setTimeout(() => {
+                    if (loadingIndicator.parentNode) {
+                        loadingIndicator.remove();
+                        console.log("[Regen .catch] 延迟后移除加载指示器。");
+                    }
+                }, 300);
+            }
+            
+            // 显示错误消息
+            const errorMsg = `重新生成失败: ${error.message || '未知错误'}`;
+            
+            // 重置重新生成按钮状态
+            const regenBtn = document.querySelector(`.regenerate-btn[data-message-id="${userMessageId}"]`);
+            if (regenBtn) {
+                regenBtn.removeAttribute('data-regenerating');
+                regenBtn.classList.remove('btn-processing');
+                regenBtn.disabled = false;
+                regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+            }
+            
+            // 检查是否还有其他活跃的重新生成
+            const otherRegenActive = !!document.querySelector('.regenerate-btn[data-regenerating="true"]');
+            if (!otherRegenActive) {
+                window.isGeneratingResponse = false;
+                console.log(`[Regen .catch ${userMessageId}] 没有其他活跃的重新生成。确保停止按钮隐藏。`);
+                if (typeof hideStopGenerationButton === 'function') hideStopGenerationButton();
+            }
+        })
+        .finally(() => {
+            // 重置重新生成按钮
+            const regenBtn = document.querySelector(`.regenerate-btn[data-message-id="${userMessageId}"]`);
+            if (regenBtn) {
+                regenBtn.removeAttribute('data-regenerating');
+                regenBtn.classList.remove('btn-processing');
+                regenBtn.disabled = false;
+                regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+                console.log(`[Regen Finally ${userMessageId}] 已重置重新生成按钮状态`);
+            }
+            
+            // 检查是否还有其他活跃的重新生成
+            // 使用强制延迟确保DOM已更新
+            setTimeout(() => {
+                // 更准确地检查是否有其他活跃的重新生成按钮
+                const activeRegenBtns = document.querySelectorAll('.regenerate-btn[data-regenerating="true"]');
+                const otherRegenActive = activeRegenBtns.length > 0;
+                
+                console.log(`[Regen Finally ${userMessageId}] 检测到${activeRegenBtns.length}个活跃的重新生成按钮`);
+                
+                if (!otherRegenActive) {
+                    console.log(`[Regen Finally ${userMessageId}] 没有其他活跃的重新生成。设置 window.isGeneratingResponse = false。`);
+                    window.isGeneratingResponse = false;
+                    console.log(`[Regen Finally ${userMessageId}] 确保停止按钮隐藏。`);
+                    if (typeof hideStopGenerationButton === 'function') hideStopGenerationButton();
+                } else {
+                    // 仍显示活跃状态，但这可能是UI状态不一致导致的
+                    console.log(`[Regen Finally ${userMessageId}] 警告：检测到${activeRegenBtns.length}个活跃的重新生成按钮，但可能是状态不一致导致的`);
+                    console.log(`[Regen Finally ${userMessageId}] 为安全起见，强制重置状态`);
+                    window.isGeneratingResponse = false;
+                    if (typeof hideStopGenerationButton === 'function') hideStopGenerationButton();
+                }
+            }, 10); // 短延迟确保DOM已更新
+        });
+    }
+    
+    // 启动请求
+    sendRegenerateRequest();
 }
 
-// Helper to create AI loading indicator
-function createLoadingIndicator() {
+// Helper to create AI loading indicator with a unique ID
+function createLoadingIndicator(uniqueId) {
     const loadingDiv = document.createElement('div');
     loadingDiv.className = 'alert alert-secondary';
-    loadingDiv.id = 'ai-response-loading'; // Keep ID for potential targeting by WS updates
+    loadingDiv.id = uniqueId; // Use the provided unique ID
     const timestamp = new Date().toLocaleTimeString();
     loadingDiv.innerHTML = `
         <div class="d-flex justify-content-between">
@@ -815,11 +1062,23 @@ function displaySystemError(errorMessage, insertAfterElement = null) {
      errorDiv.innerHTML = `
          <div class="d-flex justify-content-between">
              <span>系统</span>
-             <small>${new Date().toLocaleTimeString()}</small>
+             <div>
+                 <small>${new Date().toLocaleTimeString()}</small>
+                 <button class="btn btn-sm btn-close ms-2" aria-label="关闭"></button>
+             </div>
          </div>
          <hr>
          <p>${escapeHtml(errorMessage)}</p>
      `;
+     
+     // 添加关闭按钮事件
+     const closeBtn = errorDiv.querySelector('.btn-close');
+     if (closeBtn) {
+         closeBtn.addEventListener('click', function() {
+             errorDiv.remove();
+         });
+     }
+     
      const messageContainer = document.querySelector('#message-container');
      if (insertAfterElement && insertAfterElement.parentNode === messageContainer) {
           insertAfterElement.insertAdjacentElement('afterend', errorDiv);
@@ -830,4 +1089,13 @@ function displaySystemError(errorMessage, insertAfterElement = null) {
           return; // Exit if no container
      }
      errorDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+     
+     // 5秒后自动消失
+     setTimeout(() => {
+         if (errorDiv.parentNode) {
+             errorDiv.style.opacity = '0';
+             errorDiv.style.transition = 'opacity 0.5s ease';
+             setTimeout(() => errorDiv.remove(), 500);
+         }
+     }, 5000);
 }

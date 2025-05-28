@@ -31,11 +31,13 @@
     
     <!-- 管理员设置选项卡 -->
     <ul class="nav nav-tabs mb-4" id="adminTabs" role="tablist">
+        {% if is_admin %}
         <li class="nav-item" role="presentation">
             <button class="nav-link active" id="providers-tab" data-bs-toggle="tab" data-bs-target="#providers-content" type="button" role="tab">服务提供商</button>
         </li>
+        {% endif %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="models-tab" data-bs-toggle="tab" data-bs-target="#models-content" type="button" role="tab">AI模型</button>
+            <button class="nav-link {% if not is_admin %}active{% endif %}" id="models-tab" data-bs-toggle="tab" data-bs-target="#models-content" type="button" role="tab">AI模型</button>
         </li>
         {% if is_admin %}
         <li class="nav-item" role="presentation">
@@ -47,6 +49,7 @@
     <!-- 选项卡内容 -->
     <div class="tab-content" id="adminTabContent">
         <!-- 服务提供商选项卡 -->
+        {% if is_admin %}
         <div class="tab-pane fade show active" id="providers-content" role="tabpanel">
             <div class="card">
                 <div class="card-header d-flex justify-content-between align-items-center">
@@ -85,9 +88,10 @@
                 </div>
             </div>
         </div>
+        {% endif %}
         
         <!-- AI模型选项卡 -->
-        <div class="tab-pane fade" id="models-content" role="tabpanel">
+        <div class="tab-pane fade {% if not is_admin %}show active{% endif %}" id="models-content" role="tabpanel">
             <div class="card">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <span>AI模型</span>
@@ -145,11 +149,14 @@
                                 <h6 class="mb-1">{{ user.username }}</h6>
                                 <p class="mb-1 small text-muted">注册时间：{{ user.date_joined|date:"Y-m-d H:i" }}</p>
                             </div>
-                            <div>
-                                <div class="form-check form-switch">
+                            <div class="d-flex align-items-center">
+                                <div class="form-check form-switch me-3">
                                     <input class="form-check-input user-admin-toggle" type="checkbox" {% if user.is_admin %}checked{% endif %}>
                                     <label class="form-check-label">管理员</label>
                                 </div>
+                                {% if user.id != current_user.id %}
+                                <button class="btn btn-sm btn-outline-danger delete-user-btn">删除</button>
+                                {% endif %}
                             </div>
                         </div>
                         {% empty %}
@@ -499,6 +506,42 @@
                 console.error('操作出错:', error);
                 alert('操作失败，请稍后再试');
             });
+        }
+    });
+    
+    // 删除用户
+    document.addEventListener('click', function(e) {
+        if (e.target.classList.contains('delete-user-btn')) {
+            const userItem = e.target.closest('.list-group-item');
+            const userId = userItem.getAttribute('data-user-id');
+            const username = userItem.querySelector('h6').textContent;
+            
+            if (confirm(`确定要删除用户 ${username} 吗？此操作不可恢复。`)) {
+                fetch('/users/api/manage-roles/', {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': getCookie('csrftoken')
+                    },
+                    body: JSON.stringify({
+                        user_id: userId
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert(data.message);
+                        // 从DOM中移除用户项
+                        userItem.remove();
+                    } else {
+                        alert('删除失败: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('删除出错:', error);
+                    alert('删除失败，请稍后再试');
+                });
+            }
         }
     });
     

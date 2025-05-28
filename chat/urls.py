@@ -25,6 +25,7 @@ urlpatterns = [
     path('api/messages/delete/', api.delete_message_api, name='api-delete-message'),
     path('api/messages/<str:conversation_id>/', api.messages_api, name='api-messages'),
     path('api/sync_conversation/', api.sync_conversation_api, name='api-sync-conversation'),
+    path('api/stop_generation/', api.stop_generation_api, name='api-stop-generation'),  # 新增：终止生成API
 
     # WebSocket测试（保留）
     path('test_ws/', pages.ws_test, name='ws-test'), # Moved to pages.py

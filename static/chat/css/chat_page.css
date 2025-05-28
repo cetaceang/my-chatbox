@@ -28,3 +28,39 @@
     line-height: inherit !important;
     font-size: inherit !important;
 }
+
+/* 思维链样式 */
+details.thinking-chain {
+    margin: 10px 0;
+    border: 1px solid #e0e0e0;
+    border-radius: 5px;
+    background-color: #f8f9fa;
+    overflow: hidden;
+}
+
+details.thinking-chain summary {
+    padding: 8px 12px;
+    background-color: #f0f0f0;
+    cursor: pointer;
+    font-weight: 500;
+    color: #505050;
+    transition: background-color 0.2s;
+    user-select: none;
+}
+
+details.thinking-chain summary:hover {
+    background-color: #e8e8e8;
+}
+
+details.thinking-chain .thinking-content {
+    padding: 12px;
+    border-top: 1px solid #e0e0e0;
+    background-color: #fafafa;
+    color: #606060;
+    font-size: 0.95em;
+    line-height: 1.5;
+}
+
+details.thinking-chain[open] summary {
+    border-bottom: 1px solid #e0e0e0;
+}

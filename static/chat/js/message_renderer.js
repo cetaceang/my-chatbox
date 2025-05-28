@@ -32,21 +32,53 @@ function renderMessageContent(messageElement) {
     console.log(`[RenderMessage] Target cleared for ID ${messageIdForLog}`);
 
     try {
+        // 处理思维链标签 <think></think>
+        let processedContent = originalContent;
+        const thinkRegex = /<think>([\s\S]*?)<\/think>/g;
+        let hasThinkContent = false;
+        
+        // 检查是否包含思维链
+        if (thinkRegex.test(originalContent)) {
+            hasThinkContent = true;
+            console.log(`[RenderMessage] Found thinking chain in message ID ${messageIdForLog}`);
+            
+            // 重置正则表达式状态
+            thinkRegex.lastIndex = 0;
+            
+            // 替换思维链为可折叠区域
+            processedContent = originalContent.replace(thinkRegex, (match, thinkContent) => {
+                return `<details class="thinking-chain">
+                    <summary>查看思考过程</summary>
+                    <div class="thinking-content">${thinkContent}</div>
+                </details>`;
+            });
+        }
+
         // 3. 渲染Markdown
         console.log(`[RenderMessage] Calling marked.parse() for ID ${messageIdForLog}`);
         if (typeof marked === 'undefined') {
             console.error(`[RenderMessage] ERROR: Marked library not loaded for ID ${messageIdForLog}`);
-            renderTarget.textContent = originalContent; // Fallback to plain text
+            renderTarget.textContent = processedContent; // Fallback to plain text
             renderTarget.setAttribute('data-rendered', 'error');
             return;
         }
         
-        const renderedMarkdown = marked.parse(originalContent, { breaks: true });
+        const renderedMarkdown = marked.parse(processedContent, { breaks: true });
         console.log(`[RenderMessage] Marked rendered ${renderedMarkdown.length} chars for ID ${messageIdForLog}`);
         
         // 4. 设置渲染后的HTML内容
         renderTarget.innerHTML = renderedMarkdown;
         console.log(`[RenderMessage] HTML set for ID ${messageIdForLog}, current length: ${renderTarget.innerHTML.length}`);
+
+        // 如果有思维链，添加样式
+        if (hasThinkContent) {
+            const detailsElements = renderTarget.querySelectorAll('details.thinking-chain');
+            detailsElements.forEach(details => {
+                details.classList.add('thinking-chain');
+                details.querySelector('summary').classList.add('thinking-summary');
+                details.querySelector('.thinking-content').classList.add('thinking-content');
+            });
+        }
 
         // 5. 处理MathJax渲染
         if (typeof MathJax !== 'undefined' && MathJax.typesetPromise) {

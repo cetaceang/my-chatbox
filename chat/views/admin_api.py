@@ -13,6 +13,7 @@ from chat.models import AIProvider, AIModel
 from .utils import ensure_valid_api_url # Import from local utils
 from .decorators import admin_required # Import from local decorators
 from users.models import UserProfile # Assuming UserProfile is in users.models
+from .api import is_user_admin  # 导入辅助函数
 
 logger = logging.getLogger(__name__)
 
@@ -224,21 +225,8 @@ def delete_model(request):
 def manage_providers_api(request):
     """管理AI服务提供商 (管理员)"""
     # Check admin status first for all methods
-    is_admin = False
-    if request.user.is_authenticated:
-        try:
-            profile = request.user.profile
-            is_admin = profile.is_admin
-        except UserProfile.DoesNotExist:
-            is_admin = False
-        except AttributeError:
-             is_admin = False
-
-    if not is_admin:
-         # Allow GET for listing active providers for non-admins?
-         # For now, restrict all provider management to admins.
-         return JsonResponse({'success': False, 'message': "权限不足"}, status=403)
-
+    if not is_user_admin(request.user):
+        return JsonResponse({'success': False, 'message': "权限不足，只有管理员可以查看和管理服务提供商"}, status=403)
 
     if request.method == 'GET':
         # 获取所有服务提供商 (管理员)

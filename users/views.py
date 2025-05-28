@@ -117,6 +117,41 @@ def manage_user_role(request):
                 'message': f"操作失败: {str(e)}"
             }, status=400)
     
+    elif request.method == 'DELETE':
+        # 删除用户
+        try:
+            data = json.loads(request.body)
+            user_id = data.get('user_id')
+            
+            if not user_id:
+                return JsonResponse({
+                    'success': False,
+                    'message': '缺少用户ID'
+                }, status=400)
+            
+            # 不能删除自己
+            if str(request.user.id) == str(user_id):
+                return JsonResponse({
+                    'success': False,
+                    'message': '不能删除自己的账户'
+                }, status=400)
+            
+            user = get_object_or_404(User, id=user_id)
+            username = user.username
+            
+            # 删除用户
+            user.delete()
+            
+            return JsonResponse({
+                'success': True,
+                'message': f"已成功删除用户 {username}"
+            })
+        except Exception as e:
+            return JsonResponse({
+                'success': False,
+                'message': f"删除失败: {str(e)}"
+            }, status=400)
+    
     return JsonResponse({
         'success': False,
         'message': '不支持的请求方法'
