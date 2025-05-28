@@ -18,6 +18,7 @@ urlpatterns = [
 
     # API接口 - Core Chat
     path('api/chat/', api.chat_api, name='api-chat'),
+    path('api/upload_file/', api.upload_file_api, name='api-upload-file'),  # 新增：文件上传API
     path('api/conversations/', api.conversations_api, name='api-conversations'),
     path('api/messages/edit/', api.edit_message_api, name='api-edit-message'),
     path('api/messages/regenerate/', api.regenerate_message_api, name='api-regenerate-message'),

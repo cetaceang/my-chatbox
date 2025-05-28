@@ -44,14 +44,32 @@
                     <div class="input-group mt-3">
                         <textarea id="message-input" class="form-control" rows="3" 
                                   placeholder="输入消息..." style="resize: none"></textarea>
+                        <button id="upload-file-btn" class="btn btn-outline-secondary" title="上传文件">
+                            <i class="bi bi-paperclip"></i>
+                        </button>
                         <button id="send-button" class="btn btn-primary">
                             <i class="bi bi-send"></i>
                         </button>
                     </div>
+                    <!-- 隐藏的文件上传控件 -->
+                    <input type="file" id="file-upload" style="display: none">
                 </div>
             </div>
         </div>
     </div>
+</div>
+
+<!-- 文件上传失败提示 -->
+<div class="toast-container position-fixed bottom-0 end-0 p-3">
+  <div id="file-upload-toast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
+    <div class="toast-header">
+      <strong class="me-auto">上传通知</strong>
+      <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+    </div>
+    <div class="toast-body">
+      图片上传处理失败。可能原因：当前API不支持图片上传功能，或者需要使用原生API界面上传图片。
+    </div>
+  </div>
 </div>
 
 <!-- Define global variables needed by external scripts -->

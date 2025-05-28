@@ -65,6 +65,9 @@ document.addEventListener("DOMContentLoaded", () => {
     // Define elements needed for initial setup
     const messageInput = document.querySelector('#message-input');
     const sendButton = document.querySelector('#send-button');
+    const uploadFileBtn = document.querySelector('#upload-file-btn');
+    const fileUploadInput = document.querySelector('#file-upload');
+    const fileUploadToast = document.querySelector('#file-upload-toast');
 
     // --- Initial Setup ---
     if (definitiveConversationId) {
@@ -76,12 +79,14 @@ document.addEventListener("DOMContentLoaded", () => {
         // Ensure input/button are enabled for existing conversations
         if (messageInput) messageInput.disabled = false;
         if (sendButton) sendButton.disabled = false;
+        if (uploadFileBtn) uploadFileBtn.disabled = false;
     } else {
         // New conversation scenario
         console.log("No conversation ID available. Ready for new conversation.");
         // Ensure input/button are enabled to allow sending the first message
         if (messageInput) messageInput.disabled = false;
         if (sendButton) sendButton.disabled = false;
+        if (uploadFileBtn) uploadFileBtn.disabled = false;
         console.log("Skipping WebSocket init and sync - no conversation ID yet.");
     }
 
@@ -90,6 +95,516 @@ document.addEventListener("DOMContentLoaded", () => {
     const modelSelect = document.querySelector('#model-select');
     const messageContainer = document.querySelector('#message-container');
     const conversationList = document.querySelector('#conversation-list');
+
+    // 文件上传按钮点击事件
+    if (uploadFileBtn && fileUploadInput) {
+        uploadFileBtn.onclick = function() {
+            fileUploadInput.click(); // 触发隐藏的文件选择器
+        };
+    }
+
+    // 文件选择处理
+    if (fileUploadInput && modelSelect) {
+        fileUploadInput.onchange = function() {
+            if (fileUploadInput.files.length > 0) {
+                const file = fileUploadInput.files[0];
+                
+                // 检查文件类型是否为图片
+                const fileType = file.type;
+                if (!fileType.startsWith('image/')) {
+                    alert('目前仅支持图片格式的文件上传');
+                    fileUploadInput.value = '';
+                    return;
+                }
+                
+                // 检查文件大小
+                const maxSize = 5 * 1024 * 1024; // 5MB
+                if (file.size > maxSize) {
+                    alert('图片大小不能超过5MB');
+                    fileUploadInput.value = '';
+                    return;
+                }
+                
+                // 显示已选择图片的预览
+                const previewContainer = document.createElement('div');
+                previewContainer.id = 'image-preview-container';
+                previewContainer.className = 'mt-2 mb-2 border rounded p-2 d-flex align-items-center';
+                previewContainer.innerHTML = `
+                    <img src="${URL.createObjectURL(file)}" class="img-thumbnail me-2" style="max-height: 50px; max-width: 50px;" alt="${file.name}">
+                    <div class="flex-grow-1">
+                        <div class="small text-truncate">${file.name}</div>
+                        <div class="small text-muted">${(file.size / 1024).toFixed(2)} KB</div>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-danger" id="remove-image-btn">
+                        <i class="bi bi-x"></i>
+                    </button>
+                `;
+                
+                // 将预览添加到输入框上方
+                const inputGroup = messageInput.closest('.input-group');
+                inputGroup.parentNode.insertBefore(previewContainer, inputGroup);
+                
+                // 添加移除图片按钮事件
+                document.getElementById('remove-image-btn').addEventListener('click', function() {
+                    previewContainer.remove();
+                    fileUploadInput.value = '';
+                });
+                
+                // 修改发送按钮行为，使其同时发送消息和图片
+                const originalSendBtnClick = sendButton.onclick;
+                sendButton.onclick = function() {
+                    const message = messageInput.value.trim();
+                    const modelId = modelSelect.value;
+                    
+                    // 如果没有消息但有图片，添加默认消息
+                    if (!message) {
+                        messageInput.value = "请描述这张图片";
+                    }
+                    
+                    // 创建FormData对象
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    formData.append('model_id', modelId);
+                    formData.append('message', messageInput.value);
+                    
+                    if (window.conversationId) {
+                        formData.append('conversation_id', window.conversationId);
+                    }
+                    
+                    // 禁用输入控件
+                    if (messageInput) messageInput.disabled = true;
+                    if (sendButton) sendButton.disabled = true;
+                    if (uploadFileBtn) uploadFileBtn.disabled = true;
+                    
+                    // 显示加载指示器
+                    const userMessageDiv = document.createElement('div');
+                    userMessageDiv.className = 'alert alert-primary';
+                    userMessageDiv.innerHTML = `
+                        <div class="d-flex justify-content-between">
+                            <span>您</span>
+                            <div>
+                                <small>${new Date().toLocaleTimeString()}</small>
+                            </div>
+                        </div>
+                        <hr>
+                        <p>${escapeHtml(messageInput.value)}</p>
+                        <div class="text-center">
+                            <img src="${URL.createObjectURL(file)}" class="img-fluid mt-2" style="max-height: 150px; max-width: 150px;" alt="${file.name}">
+                        </div>
+                        <div class="text-center mt-2">
+                            <div class="spinner-border spinner-border-sm" role="status">
+                                <span class="visually-hidden">加载中...</span>
+                            </div>
+                            <span class="ms-2">正在处理，请稍候...</span>
+                        </div>
+                    `;
+                    
+                    if (messageContainer) {
+                        messageContainer.appendChild(userMessageDiv);
+                        userMessageDiv.scrollIntoView();
+                    }
+                    
+                    // 发送文件和消息到服务器
+                    fetch('/chat/api/upload_file/', {
+                        method: 'POST',
+                        headers: {
+                            'X-CSRFToken': getCookie('csrftoken')
+                        },
+                        body: formData
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        // 重新启用输入控件
+                        if (messageInput) messageInput.disabled = false;
+                        if (sendButton) sendButton.disabled = false;
+                        if (uploadFileBtn) uploadFileBtn.disabled = false;
+                        
+                        // 清除文件选择和预览
+                        fileUploadInput.value = '';
+                        previewContainer.remove();
+                        
+                        // 保存原始消息内容
+                        const originalMessage = messageInput.value || '请描述这张图片';
+                        
+                        // 清空输入框
+                        messageInput.value = '';
+                        
+                        // 恢复原始发送按钮功能
+                        sendButton.onclick = originalSendBtnClick;
+                        
+                        console.log("文件上传API响应:", data);
+                        
+                        if (data.success) {
+                            // 更新上传消息
+                            userMessageDiv.innerHTML = `
+                                <div class="d-flex justify-content-between">
+                                    <span>您</span>
+                                    <div>
+                                        <small>${new Date().toLocaleTimeString()}</small>
+                                    </div>
+                                </div>
+                                <hr>
+                                <p>${escapeHtml(originalMessage)}</p>
+                                <div class="text-center">
+                                    <img src="${URL.createObjectURL(file)}" class="img-fluid mt-2" style="max-height: 150px; max-width: 150px;" alt="${file.name}">
+                                </div>
+                                <div class="mt-2 text-muted small">
+                                    <i class="bi bi-info-circle"></i> 
+                                    提示：如果AI无法"看到"图片内容，可能是因为当前API不支持图片功能。
+                                    您可以尝试使用API原生的图片上传界面。
+                                </div>
+                            `;
+                            
+                            // 如果创建了新对话，更新对话ID
+                            if (data.new_conversation_id) {
+                                window.conversationId = data.new_conversation_id;
+                                storeConversationId(window.conversationId);
+                                // 更新URL但不重新加载页面
+                                const newUrl = `/chat/?conversation_id=${window.conversationId}`;
+                                window.history.pushState({ path: newUrl }, '', newUrl);
+                                // 刷新侧边栏对话列表
+                                refreshConversationList();
+                            }
+                            
+                            // 显示AI响应
+                            if (data.ai_response) {
+                                console.log("收到AI回复:", data.ai_response);
+                                
+                                const aiMessageDiv = document.createElement('div');
+                                aiMessageDiv.className = 'alert alert-secondary';
+                                aiMessageDiv.innerHTML = `
+                                    <div class="d-flex justify-content-between">
+                                        <span>助手</span>
+                                        <div>
+                                            <small>${new Date().toLocaleTimeString()}</small>
+                                        </div>
+                                    </div>
+                                    <hr>
+                                    <p><span class="render-target" data-original-content="${escapeHtml(data.ai_response)}">${escapeHtml(data.ai_response)}</span></p>
+                                `;
+                                
+                                if (messageContainer) {
+                                    messageContainer.appendChild(aiMessageDiv);
+                                    renderMessageContent(aiMessageDiv);
+                                    aiMessageDiv.scrollIntoView();
+                                }
+                            } else {
+                                console.warn("API返回成功但没有AI回复内容");
+                            }
+                        } else {
+                            // 显示上传失败消息
+                            userMessageDiv.innerHTML = `
+                                <div class="d-flex justify-content-between">
+                                    <span>您</span>
+                                    <div>
+                                        <small>${new Date().toLocaleTimeString()}</small>
+                                    </div>
+                                </div>
+                                <hr>
+                                <p>${escapeHtml(originalMessage)}</p>
+                                <div class="text-center">
+                                    <img src="${URL.createObjectURL(file)}" class="img-fluid mt-2" style="max-height: 150px; max-width: 150px;" alt="${file.name}">
+                                </div>
+                                <p class="text-danger mt-2">图片上传失败: ${data.message || '该模型不支持图片上传'}</p>
+                            `;
+                            
+                            // 显示Toast提示
+                            const toastBody = document.querySelector('#file-upload-toast .toast-body');
+                            if (toastBody) {
+                                toastBody.textContent = data.message || '该模型不支持图片上传';
+                            }
+                            const toast = new bootstrap.Toast(fileUploadToast);
+                            toast.show();
+                        }
+                    })
+                    .catch(error => {
+                        console.error('上传文件时出错:', error);
+                        
+                        // 重新启用输入控件
+                        if (messageInput) messageInput.disabled = false;
+                        if (sendButton) sendButton.disabled = false;
+                        if (uploadFileBtn) uploadFileBtn.disabled = false;
+                        
+                        // 清除文件选择和预览
+                        fileUploadInput.value = '';
+                        previewContainer.remove();
+                        
+                        // 恢复原始发送按钮功能
+                        sendButton.onclick = originalSendBtnClick;
+                        
+                        // 显示错误消息
+                        userMessageDiv.innerHTML = `
+                            <div class="d-flex justify-content-between">
+                                <span>您</span>
+                                <div>
+                                    <small>${new Date().toLocaleTimeString()}</small>
+                                </div>
+                            </div>
+                            <hr>
+                            <p>${escapeHtml(messageInput.value || '请描述这张图片')}</p>
+                            <div class="text-center">
+                                <img src="${URL.createObjectURL(file)}" class="img-fluid mt-2" style="max-height: 150px; max-width: 150px;" alt="${file.name}">
+                            </div>
+                            <p class="text-danger mt-2">图片上传失败: ${error.message}</p>
+                        `;
+                    });
+                };
+            }
+        };
+    }
+
+    // --- 添加粘贴图片功能 ---
+    if (messageInput) {
+        messageInput.addEventListener('paste', function(e) {
+            // 检查剪贴板是否包含图片
+            const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+            let imageItem = null;
+            
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    imageItem = items[i];
+                    break;
+                }
+            }
+            
+            // 如果找到图片
+            if (imageItem) {
+                e.preventDefault(); // 阻止默认粘贴行为
+                
+                const file = imageItem.getAsFile();
+                console.log('粘贴的图片:', file.name, file.type, file.size);
+                
+                // 检查文件大小
+                const maxSize = 5 * 1024 * 1024; // 5MB
+                if (file.size > maxSize) {
+                    alert('图片大小不能超过5MB');
+                    return;
+                }
+                
+                // 显示已选择图片的预览
+                const previewContainer = document.createElement('div');
+                previewContainer.id = 'image-preview-container';
+                previewContainer.className = 'mt-2 mb-2 border rounded p-2 d-flex align-items-center';
+                previewContainer.innerHTML = `
+                    <img src="${URL.createObjectURL(file)}" class="img-thumbnail me-2" style="max-height: 50px; max-width: 50px;" alt="粘贴的图片">
+                    <div class="flex-grow-1">
+                        <div class="small text-truncate">粘贴的图片</div>
+                        <div class="small text-muted">${(file.size / 1024).toFixed(2)} KB</div>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-danger" id="remove-image-btn">
+                        <i class="bi bi-x"></i>
+                    </button>
+                `;
+                
+                // 将预览添加到输入框上方
+                const inputGroup = messageInput.closest('.input-group');
+                inputGroup.parentNode.insertBefore(previewContainer, inputGroup);
+                
+                // 添加移除图片按钮事件
+                document.getElementById('remove-image-btn').addEventListener('click', function() {
+                    previewContainer.remove();
+                });
+                
+                // 修改发送按钮行为，使其同时发送消息和图片
+                const originalSendBtnClick = sendButton.onclick;
+                sendButton.onclick = function() {
+                    const message = messageInput.value.trim();
+                    const modelId = modelSelect.value;
+                    
+                    // 如果没有消息但有图片，添加默认消息
+                    if (!message) {
+                        messageInput.value = "请描述这张图片";
+                    }
+                    
+                    // 创建FormData对象
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    formData.append('model_id', modelId);
+                    formData.append('message', messageInput.value);
+                    
+                    if (window.conversationId) {
+                        formData.append('conversation_id', window.conversationId);
+                    }
+                    
+                    // 禁用输入控件
+                    if (messageInput) messageInput.disabled = true;
+                    if (sendButton) sendButton.disabled = true;
+                    if (uploadFileBtn) uploadFileBtn.disabled = true;
+                    
+                    // 显示加载指示器
+                    const userMessageDiv = document.createElement('div');
+                    userMessageDiv.className = 'alert alert-primary';
+                    userMessageDiv.innerHTML = `
+                        <div class="d-flex justify-content-between">
+                            <span>您</span>
+                            <div>
+                                <small>${new Date().toLocaleTimeString()}</small>
+                            </div>
+                        </div>
+                        <hr>
+                        <p>${escapeHtml(messageInput.value)}</p>
+                        <div class="text-center">
+                            <img src="${URL.createObjectURL(file)}" class="img-fluid mt-2" style="max-height: 150px; max-width: 150px;" alt="粘贴的图片">
+                        </div>
+                        <div class="text-center mt-2">
+                            <div class="spinner-border spinner-border-sm" role="status">
+                                <span class="visually-hidden">加载中...</span>
+                            </div>
+                            <span class="ms-2">正在处理，请稍候...</span>
+                        </div>
+                    `;
+                    
+                    if (messageContainer) {
+                        messageContainer.appendChild(userMessageDiv);
+                        userMessageDiv.scrollIntoView();
+                    }
+                    
+                    // 发送文件和消息到服务器
+                    fetch('/chat/api/upload_file/', {
+                        method: 'POST',
+                        headers: {
+                            'X-CSRFToken': getCookie('csrftoken')
+                        },
+                        body: formData
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        // 重新启用输入控件
+                        if (messageInput) messageInput.disabled = false;
+                        if (sendButton) sendButton.disabled = false;
+                        if (uploadFileBtn) uploadFileBtn.disabled = false;
+                        
+                        // 清除文件选择和预览
+                        previewContainer.remove();
+                        
+                        // 保存原始消息内容
+                        const originalMessage = messageInput.value || '请描述这张图片';
+                        
+                        // 清空输入框
+                        messageInput.value = '';
+                        
+                        // 恢复原始发送按钮功能
+                        sendButton.onclick = originalSendBtnClick;
+                        
+                        console.log("文件上传API响应:", data);
+                        
+                        if (data.success) {
+                            // 更新上传消息
+                            userMessageDiv.innerHTML = `
+                                <div class="d-flex justify-content-between">
+                                    <span>您</span>
+                                    <div>
+                                        <small>${new Date().toLocaleTimeString()}</small>
+                                    </div>
+                                </div>
+                                <hr>
+                                <p>${escapeHtml(originalMessage)}</p>
+                                <div class="text-center">
+                                    <img src="${URL.createObjectURL(file)}" class="img-fluid mt-2" style="max-height: 150px; max-width: 150px;" alt="粘贴的图片">
+                                </div>
+                                <div class="mt-2 text-muted small">
+                                    <i class="bi bi-info-circle"></i> 
+                                    提示：如果AI无法"看到"图片内容，可能是因为当前API不支持图片功能。
+                                    您可以尝试使用API原生的图片上传界面。
+                                </div>
+                            `;
+                            
+                            // 如果创建了新对话，更新对话ID
+                            if (data.new_conversation_id) {
+                                window.conversationId = data.new_conversation_id;
+                                storeConversationId(window.conversationId);
+                                // 更新URL但不重新加载页面
+                                const newUrl = `/chat/?conversation_id=${window.conversationId}`;
+                                window.history.pushState({ path: newUrl }, '', newUrl);
+                                // 刷新侧边栏对话列表
+                                refreshConversationList();
+                            }
+                            
+                            // 显示AI响应
+                            if (data.ai_response) {
+                                console.log("收到AI回复:", data.ai_response);
+                                
+                                const aiMessageDiv = document.createElement('div');
+                                aiMessageDiv.className = 'alert alert-secondary';
+                                aiMessageDiv.innerHTML = `
+                                    <div class="d-flex justify-content-between">
+                                        <span>助手</span>
+                                        <div>
+                                            <small>${new Date().toLocaleTimeString()}</small>
+                                        </div>
+                                    </div>
+                                    <hr>
+                                    <p><span class="render-target" data-original-content="${escapeHtml(data.ai_response)}">${escapeHtml(data.ai_response)}</span></p>
+                                `;
+                                
+                                if (messageContainer) {
+                                    messageContainer.appendChild(aiMessageDiv);
+                                    renderMessageContent(aiMessageDiv);
+                                    aiMessageDiv.scrollIntoView();
+                                }
+                            } else {
+                                console.warn("API返回成功但没有AI回复内容");
+                            }
+                        } else {
+                            // 显示上传失败消息
+                            userMessageDiv.innerHTML = `
+                                <div class="d-flex justify-content-between">
+                                    <span>您</span>
+                                    <div>
+                                        <small>${new Date().toLocaleTimeString()}</small>
+                                    </div>
+                                </div>
+                                <hr>
+                                <p>${escapeHtml(originalMessage)}</p>
+                                <div class="text-center">
+                                    <img src="${URL.createObjectURL(file)}" class="img-fluid mt-2" style="max-height: 150px; max-width: 150px;" alt="粘贴的图片">
+                                </div>
+                                <p class="text-danger mt-2">图片上传失败: ${data.message || '该模型不支持图片上传'}</p>
+                            `;
+                            
+                            // 显示Toast提示
+                            const toastBody = document.querySelector('#file-upload-toast .toast-body');
+                            if (toastBody) {
+                                toastBody.textContent = data.message || '该模型不支持图片上传';
+                            }
+                            const toast = new bootstrap.Toast(fileUploadToast);
+                            toast.show();
+                        }
+                    })
+                    .catch(error => {
+                        console.error('上传文件时出错:', error);
+                        
+                        // 重新启用输入控件
+                        if (messageInput) messageInput.disabled = false;
+                        if (sendButton) sendButton.disabled = false;
+                        if (uploadFileBtn) uploadFileBtn.disabled = false;
+                        
+                        // 清除文件选择和预览
+                        previewContainer.remove();
+                        
+                        // 恢复原始发送按钮功能
+                        sendButton.onclick = originalSendBtnClick;
+                        
+                        // 显示错误消息
+                        userMessageDiv.innerHTML = `
+                            <div class="d-flex justify-content-between">
+                                <span>您</span>
+                                <div>
+                                    <small>${new Date().toLocaleTimeString()}</small>
+                                </div>
+                            </div>
+                            <hr>
+                            <p>${escapeHtml(messageInput.value || '请描述这张图片')}</p>
+                            <div class="text-center">
+                                <img src="${URL.createObjectURL(file)}" class="img-fluid mt-2" style="max-height: 150px; max-width: 150px;" alt="粘贴的图片">
+                            </div>
+                            <p class="text-danger mt-2">图片上传失败: ${error.message}</p>
+                        `;
+                    });
+                };
+            }
+        });
+    }
 
     // Send Button Click
     if (sendButton && messageInput && modelSelect) {

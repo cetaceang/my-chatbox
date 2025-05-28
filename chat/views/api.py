@@ -2,6 +2,8 @@ import json
 import logging
 import requests
 import traceback
+import base64
+import mimetypes
 
 from django.shortcuts import get_object_or_404
 from django.http import JsonResponse, HttpResponseBadRequest
@@ -15,6 +17,341 @@ from .utils import ensure_valid_api_url # Import from local utils
 logger = logging.getLogger(__name__)
 
 # API接口 - 核心聊天功能
+
+@login_required
+@csrf_exempt
+@require_http_methods(["POST"])
+def upload_file_api(request):
+    """处理文件上传请求并转发到AI服务"""
+    try:
+        conversation_id = request.POST.get('conversation_id')
+        model_id = request.POST.get('model_id')
+        message_content = request.POST.get('message', '请描述这张图片')
+        
+        if not model_id or 'file' not in request.FILES:
+            return JsonResponse({
+                'success': False,
+                'message': "缺少必要参数或文件"
+            }, status=400)
+        
+        uploaded_file = request.FILES['file']
+        
+        # 获取选择的模型
+        model = get_object_or_404(AIModel, id=model_id)
+        is_new_conversation = False
+        
+        # 获取或创建会话
+        if conversation_id:
+            conversation = get_object_or_404(Conversation, id=conversation_id, user=request.user)
+        else:
+            # 创建新会话
+            is_new_conversation = True
+            conversation = Conversation.objects.create(
+                user=request.user,
+                selected_model=model,
+                title=message_content[:30] + "..." if len(message_content) > 30 else message_content
+            )
+        
+        # 保存用户上传文件消息
+        file_message_content = f"{message_content}\n[上传文件: {uploaded_file.name}]"
+        user_message = Message.objects.create(
+            conversation=conversation,
+            content=file_message_content,
+            is_user=True,
+            model_used=model
+        )
+        
+        # 获取历史消息
+        history_messages = Message.objects.filter(conversation=conversation).order_by('timestamp')
+        
+        # 如果消息超过模型的限制，则只取最近的消息
+        if history_messages.count() > model.max_history_messages:
+            history_messages = history_messages[history_messages.count() - model.max_history_messages:]
+        
+        # 构建API请求
+        api_url = ensure_valid_api_url(model.provider.base_url, "/v1/chat/completions")
+        api_key = model.provider.api_key
+        
+        # 获取文件内容并进行base64编码
+        file_content = uploaded_file.read()
+        base64_content = base64.b64encode(file_content).decode('utf-8')
+        
+        # 确定文件的MIME类型
+        mime_type = uploaded_file.content_type
+        if not mime_type:
+            mime_type = mimetypes.guess_type(uploaded_file.name)[0] or 'application/octet-stream'
+        
+        # 构建消息列表
+        messages = []
+        
+        # 添加历史消息
+        for msg in history_messages:
+            if msg.id != user_message.id:  # 排除当前上传消息
+                role = "user" if msg.is_user else "assistant"
+                messages.append({
+                    "role": role,
+                    "content": msg.content
+                })
+        
+        # 构建带图片的用户消息 - 尝试多种可能的格式
+        
+        # 1. 尝试OpenAI的格式
+        user_message_with_image_openai = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": message_content
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime_type};base64,{base64_content}"
+                    }
+                }
+            ]
+        }
+        
+        # 2. 尝试Claude的格式 (Anthropic)
+        user_message_with_image_claude = {
+            "role": "user",
+            "content": f"""{message_content}
+            
+<image>
+data:{mime_type};base64,{base64_content}
+</image>"""
+        }
+        
+        # 先尝试OpenAI格式
+        messages.append(user_message_with_image_openai)
+        
+        # 构建请求数据
+        request_data = {
+            "model": model.model_name,
+            "messages": messages,
+            **model.default_params
+        }
+        
+        # 记录详细的请求信息
+        logger.info(f"尝试使用OpenAI格式发送带图片的消息到API: {api_url}")
+        
+        # 替换base64数据为提示，避免日志过大
+        log_data = json.dumps(request_data)
+        log_data = log_data.replace(base64_content, "[BASE64_DATA]")
+        logger.info(f"请求结构: {log_data[:500]}...")
+        
+        # 设置请求头
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        
+        try:
+            # 发送请求 - 纯JSON方式
+            response = requests.post(
+                api_url,
+                headers=headers,
+                json=request_data,
+                timeout=60
+            )
+            
+            logger.info(f"文件上传API响应状态码: {response.status_code}")
+            
+            # 如果OpenAI格式失败，尝试Claude格式
+            if response.status_code != 200:
+                logger.info("OpenAI格式失败，尝试Claude格式")
+                
+                # 替换为Claude格式的消息
+                messages.pop()  # 移除最后一条消息
+                messages.append(user_message_with_image_claude)  # 添加Claude格式消息
+                
+                # 更新请求数据
+                request_data["messages"] = messages
+                
+                # 发送第二次请求
+                response = requests.post(
+                    api_url,
+                    headers=headers,
+                    json=request_data,
+                    timeout=60
+                )
+                
+                logger.info(f"Claude格式API响应状态码: {response.status_code}")
+            
+            # 如果成功获取响应
+            if response.status_code == 200:
+                try:
+                    response_data = response.json()
+                    logger.info(f"API响应头: {response.headers}")
+                    
+                    # 尝试记录响应数据的前1000个字符（避免过大）
+                    response_str = json.dumps(response_data)
+                    logger.info(f"API响应数据片段: {response_str[:1000]}")
+                    
+                    # 提取AI回复内容
+                    ai_content = ""
+                    
+                    # 尝试提取不同格式的响应
+                    if 'choices' in response_data and len(response_data['choices']) > 0:
+                        # 标准OpenAI格式
+                        if 'message' in response_data['choices'][0] and 'content' in response_data['choices'][0]['message']:
+                            ai_content = response_data['choices'][0]['message']['content']
+                            logger.info(f"成功从OpenAI格式提取AI回复内容，长度: {len(ai_content)}")
+                        # Claude可能的格式
+                        elif 'delta' in response_data['choices'][0] and 'content' in response_data['choices'][0]['delta']:
+                            ai_content = response_data['choices'][0]['delta']['content']
+                            logger.info(f"成功从delta格式提取AI回复内容，长度: {len(ai_content)}")
+                        # 直接包含content的格式
+                        elif 'content' in response_data['choices'][0]:
+                            ai_content = response_data['choices'][0]['content']
+                            logger.info(f"成功从直接content格式提取AI回复内容，长度: {len(ai_content)}")
+                        # 直接是字符串格式
+                        elif isinstance(response_data['choices'][0], str):
+                            ai_content = response_data['choices'][0]
+                            logger.info(f"成功从字符串格式提取AI回复内容，长度: {len(ai_content)}")
+                        else:
+                            logger.warning("API响应中没有找到content字段")
+                            logger.warning(f"响应结构: {json.dumps(response_data['choices'][0])[:500]}")
+                    # 尝试Claude特殊格式 - role/content结构
+                    elif 'role' in response_data and 'content' in response_data:
+                        # 检查content是否为数组
+                        if isinstance(response_data['content'], list):
+                            # 提取所有text类型的内容
+                            text_contents = []
+                            for item in response_data['content']:
+                                if isinstance(item, dict) and item.get('type') == 'text' and 'text' in item:
+                                    text_contents.append(item['text'])
+                            
+                            if text_contents:
+                                ai_content = ' '.join(text_contents)
+                                logger.info(f"成功从content数组中提取文本内容，长度: {len(ai_content)}")
+                            else:
+                                logger.warning("无法从content数组中提取文本内容")
+                                ai_content = json.dumps(response_data['content'])
+                        else:
+                            ai_content = str(response_data['content'])
+                            logger.info(f"成功从role/content结构提取AI回复内容，长度: {len(ai_content)}")
+                    # 尝试顶层content字段
+                    elif 'content' in response_data:
+                        if isinstance(response_data['content'], list):
+                            # 处理content数组
+                            text_contents = []
+                            for item in response_data['content']:
+                                if isinstance(item, dict) and item.get('type') == 'text' and 'text' in item:
+                                    text_contents.append(item['text'])
+                                elif isinstance(item, str):
+                                    text_contents.append(item)
+                            
+                            if text_contents:
+                                ai_content = ' '.join(text_contents)
+                                logger.info(f"成功从content数组中提取文本内容，长度: {len(ai_content)}")
+                            else:
+                                ai_content = json.dumps(response_data['content'])
+                        else:
+                            ai_content = str(response_data['content'])
+                            logger.info(f"成功从顶层content字段提取AI回复内容，长度: {len(ai_content)}")
+                    # 如果是字符串数组，尝试拼接
+                    elif isinstance(response_data, list) and all(isinstance(item, str) for item in response_data):
+                        ai_content = ''.join(response_data)
+                        logger.info(f"成功从字符串数组提取AI回复内容，长度: {len(ai_content)}")
+                    else:
+                        logger.warning("无法从API响应中提取内容")
+                        logger.warning(f"完整响应: {json.dumps(response_data)[:1000]}")
+                        
+                        # 尝试将整个响应作为字符串处理
+                        try:
+                            ai_content = "无法正确解析API响应。原始响应: " + json.dumps(response_data)[:500]
+                        except:
+                            ai_content = "无法正确解析API响应，且无法转换为字符串。"
+                    
+                    # 保存AI回复
+                    ai_message = Message.objects.create(
+                        conversation=conversation,
+                        content=ai_content,
+                        is_user=False,
+                        model_used=model
+                    )
+                    
+                    # 更新会话时间
+                    conversation.save()
+                    
+                    # 构建响应数据
+                    response_data = {
+                        'success': True,
+                        'message': "文件上传成功",
+                        'user_message_id': user_message.id,
+                        'ai_message_id': ai_message.id,
+                        'ai_response': ai_content,
+                        'new_conversation_id': conversation.id if is_new_conversation else None
+                    }
+                    
+                    logger.info(f"返回给前端的响应: {json.dumps(response_data)[:500]}")
+                    return JsonResponse(response_data)
+                    
+                except Exception as e:
+                    logger.error(f"处理AI回复时出错: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    
+                    # 尝试获取原始响应内容
+                    try:
+                        raw_response = response.text[:1000]
+                        logger.error(f"原始响应内容: {raw_response}")
+                    except:
+                        logger.error("无法获取原始响应内容")
+                    
+                    # 发生错误，但文件仍然上传成功，保存没有AI回复的消息
+                    return JsonResponse({
+                        'success': True,
+                        'message': "文件已上传，但处理AI回复时出错",
+                        'user_message_id': user_message.id,
+                        'new_conversation_id': conversation.id if is_new_conversation else None
+                    })
+            
+            else:
+                # API请求失败
+                error_message = "API请求失败"
+                try:
+                    error_data = response.json()
+                    if 'error' in error_data:
+                        error_message = error_data['error'].get('message', "API请求失败")
+                except:
+                    error_message = response.text[:200] if response.text else "API请求失败"
+                
+                logger.error(f"API请求失败: {error_message}")
+                logger.error(f"完整响应: {response.text}")
+                
+                # 删除已创建的消息和对话（如果是新对话）
+                user_message.delete()
+                if is_new_conversation:
+                    conversation.delete()
+                
+                return JsonResponse({
+                    'success': False,
+                    'message': f"API请求失败: {error_message}"
+                })
+                
+        except Exception as e:
+            logger.error(f"文件上传请求出错: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            # 删除已创建的消息和对话（如果是新对话）
+            user_message.delete()
+            if is_new_conversation:
+                conversation.delete()
+            
+            return JsonResponse({
+                'success': False,
+                'message': f"文件上传失败: {str(e)}"
+            })
+            
+    except Exception as e:
+        logger.error(f"处理文件上传请求时出错: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        return JsonResponse({
+            'success': False,
+            'message': f"处理请求时出错: {str(e)}"
+        }, status=500)
 
 @login_required
 @csrf_exempt
