@@ -266,6 +266,25 @@ function initWebSocket() {
                 // 检查消息是否已在状态管理器中
                 const messageId = lastAssistantMessage.getAttribute('data-message-id') || '';
                 const isLoading = lastAssistantMessage.id === 'ai-response-loading';
+
+                // NEW: Remove spinner on first update if it was a loading indicator
+                if (isLoading) {
+                    const spinner = lastAssistantMessage.querySelector('.spinner-border'); // Assuming this class
+                    if (spinner) {
+                        // Attempt to remove the spinner and its potential parent container if it's structured that way
+                        const spinnerContainer = spinner.closest('.text-center'); // Common pattern
+                        if (spinnerContainer) {
+                            spinnerContainer.remove();
+                            console.log("[WS] Removed spinner container from loading indicator.");
+                        } else {
+                            spinner.remove(); // Fallback to removing just the spinner
+                            console.log("[WS] Removed spinner element from loading indicator.");
+                        }
+                    }
+                    // Change ID immediately to prevent trying to remove spinner again
+                    lastAssistantMessage.id = 'ai-response-streaming'; // Use a temporary streaming ID
+                    console.log("[WS] Changed loading indicator ID to 'ai-response-streaming'.");
+                }
                 
                 if (!isLoading && messageId && window.ChatState && window.ChatState.getMessage(messageId)) {
                     // 使用状态管理器更新消息

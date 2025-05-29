@@ -847,6 +847,25 @@ function regenerateResponse(userMessageId) {
             // 处理成功响应
             if (data.success) {
                 console.log(`[Regen Success ${userMessageId}] Rendering new message ID: ${data.message_id}`);
+
+                // --- 在插入新消息前，移除本次重新生成对应的加载指示器 ---
+                const uniqueIndicatorId = `ai-response-loading-${userMessageId}`;
+                const loadingIndicator = document.getElementById(uniqueIndicatorId);
+                if (loadingIndicator && loadingIndicator.parentNode) {
+                    loadingIndicator.remove();
+                    console.log(`[Regen Success ${userMessageId}] 已移除加载指示器: ${uniqueIndicatorId}`);
+                } else {
+                    // 如果找不到特定ID的指示器，尝试移除通用的指示器（作为后备）
+                    const genericLoadingIndicator = document.getElementById('ai-response-loading');
+                    if (genericLoadingIndicator && genericLoadingIndicator.parentNode) {
+                        genericLoadingIndicator.remove();
+                         console.warn(`[Regen Success ${userMessageId}] 未找到特定加载指示器 ${uniqueIndicatorId}，但移除了通用指示器`);
+                    } else {
+                        console.warn(`[Regen Success ${userMessageId}] 无法找到要移除的加载指示器: ${uniqueIndicatorId}`);
+                    }
+                }
+                // --- 结束移除加载指示器 ---
+
                 const aiMessageDiv = createAIMessageDiv(data.content, data.message_id, data.timestamp);
                 // Ensure userMessageDiv still exists before inserting after it
                 if (document.body.contains(userMessageDiv)) {
@@ -957,13 +976,15 @@ function regenerateResponse(userMessageId) {
         })
         .finally(() => {
             // 重置重新生成按钮
-            const regenBtn = document.querySelector(`.regenerate-btn[data-message-id="${userMessageId}"]`);
+            const regenBtn = document.querySelector(`.alert[data-message-id="${userMessageId}"] .regenerate-btn, .alert[data-temp-id="${userMessageId}"] .regenerate-btn`); // More specific selector
             if (regenBtn) {
                 regenBtn.removeAttribute('data-regenerating');
                 regenBtn.classList.remove('btn-processing');
                 regenBtn.disabled = false;
                 regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
                 console.log(`[Regen Finally ${userMessageId}] 已重置重新生成按钮状态`);
+            } else {
+                 console.error(`[Regen Finally ${userMessageId}] 错误：无法找到要重置的重新生成按钮！选择器: .alert[data-message-id="${userMessageId}"] .regenerate-btn`);
             }
             
             // 检查是否还有其他活跃的重新生成

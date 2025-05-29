@@ -1,0 +1,66 @@
+.animate-spin {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.btn-processing {
+    opacity: 0.7;
+    pointer-events: none;
+}
+
+/* MathJax CSS Overrides to counteract Bootstrap */
+#message-container mjx-container {
+    /* Reset line-height which Bootstrap might set globally */
+    line-height: normal !important; 
+    /* Ensure text alignment is as MathJax expects */
+    text-align: left !important; 
+    /* Reset font-size that might be inherited */
+    font-size: 1em !important; 
+}
+
+/* Ensure elements within MathJax use its intended fonts/styles */
+#message-container mjx-math * {
+    font-family: inherit !important; /* Allow MathJax fonts */
+    line-height: inherit !important;
+    font-size: inherit !important;
+}
+
+/* 思维链样式 */
+details.thinking-chain {
+    margin: 10px 0;
+    border: 1px solid #e0e0e0;
+    border-radius: 5px;
+    background-color: #f8f9fa;
+    overflow: hidden;
+}
+
+details.thinking-chain summary {
+    padding: 8px 12px;
+    background-color: #f0f0f0;
+    cursor: pointer;
+    font-weight: 500;
+    color: #505050;
+    transition: background-color 0.2s;
+    user-select: none;
+}
+
+details.thinking-chain summary:hover {
+    background-color: #e8e8e8;
+}
+
+details.thinking-chain .thinking-content {
+    padding: 12px;
+    border-top: 1px solid #e0e0e0;
+    background-color: #fafafa;
+    color: #606060;
+    font-size: 0.95em;
+    line-height: 1.5;
+}
+
+details.thinking-chain[open] summary {
+    border-bottom: 1px solid #e0e0e0;
+}

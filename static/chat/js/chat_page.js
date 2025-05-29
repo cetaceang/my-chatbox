@@ -104,6 +104,34 @@ document.addEventListener("DOMContentLoaded", () => {
     const messageContainer = document.querySelector('#message-container');
     const conversationList = document.querySelector('#conversation-list');
 
+    // --- Load saved model preference ---
+    if (modelSelect) {
+        const savedModelId = localStorage.getItem('selectedModelId');
+        if (savedModelId) {
+            // Check if the saved ID exists as an option
+            const optionExists = modelSelect.querySelector(`option[value="${savedModelId}"]`);
+            if (optionExists) {
+                modelSelect.value = savedModelId;
+                console.log(`Loaded saved model preference: ${savedModelId}`);
+            } else {
+                console.warn(`Saved model ID "${savedModelId}" not found in dropdown. Using default.`);
+                // Optionally remove the invalid saved ID
+                // localStorage.removeItem('selectedModelId');
+            }
+        }
+    }
+    // --- End Load saved model preference ---
+
+    // --- Save model preference on change ---
+    if (modelSelect) {
+        modelSelect.addEventListener('change', function() {
+            const selectedId = this.value;
+            localStorage.setItem('selectedModelId', selectedId);
+            console.log(`Saved model preference: ${selectedId}`);
+        });
+    }
+    // --- End Save model preference on change ---
+
     // --- REMOVED Listener for separate stop button ---
 
     // 文件上传按钮点击事件
