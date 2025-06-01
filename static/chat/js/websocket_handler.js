@@ -52,8 +52,9 @@ function initWebSocket() {
     storeConversationId(conversationId);
     console.log("WebSocket Handler: Using conversation ID:", conversationId);
 
-    const wsUrl = 'ws://' + window.location.host + '/ws/chat/' + conversationId + '/';
-    console.log("Attempting WebSocket connection:", wsUrl);
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+    const wsUrl = wsProtocol + window.location.host + '/ws/chat/' + conversationId + '/';
+    console.log("Attempting WebSocket connection:", wsUrl); // Log the dynamically generated URL
     
     // Close existing socket if trying to re-initialize
     if (chatSocket && chatSocket.readyState !== WebSocket.CLOSED) {
