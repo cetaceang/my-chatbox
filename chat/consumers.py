@@ -853,7 +853,33 @@ class ChatConsumer(AsyncWebsocketConsumer):
                                 logger.info("收到AI响应，但检测到本地终止标志，丢弃响应")
                                 raise asyncio.CancelledError("用户请求终止生成 (Local Check After Response)")
 
-                            response_data = await response.json() # Now read the body
+                            # --- MODIFIED: Handle potential Content-Type mismatch ---
+                            response_data = None
+                            actual_content_type = response.content_type
+                            logger.info(f"Received response with Content-Type: {actual_content_type}") # Log actual type
+
+                            if actual_content_type == 'application/json':
+                                response_data = await response.json()
+                            elif actual_content_type in ['text/event-stream', 'text/plain']:
+                                logger.warning(f"Received unexpected Content-Type '{actual_content_type}', attempting to read as text and parse JSON.")
+                                response_text = await response.text()
+                                try:
+                                    response_data = json.loads(response_text)
+                                except json.JSONDecodeError as json_err:
+                                    logger.error(f"Failed to decode JSON from text response (Content-Type: {actual_content_type}): {json_err}")
+                                    logger.error(f"Response text was: {response_text[:500]}...") # Log beginning of text
+                                    raise Exception(f"AI 服务返回了非预期的内容类型 ({actual_content_type}) 且无法解析为 JSON。") from json_err
+                            else:
+                                response_text = await response.text()
+                                error_msg = f"AI 服务返回了非预期的内容类型: {actual_content_type} - Body: {response_text[:500]}..."
+                                logger.error(error_msg)
+                                raise Exception(error_msg)
+                            # --- END MODIFIED ---
+
+                            # Ensure response_data is not None before proceeding
+                            if response_data is None:
+                                raise Exception("未能成功解析 AI 服务的响应数据。")
+
 
                             if 'choices' in response_data and len(response_data['choices']) > 0:
                                 # 处理标准OpenAI格式
