@@ -7,12 +7,18 @@ import aiohttp
 import asyncio
 import logging
 import threading
+import json
 import uuid # Import uuid
+import aiohttp
+import asyncio
+import logging
 # REMOVED: from asgiref.sync import sync_to_async (No longer needed here)
 
 from .models import Conversation, Message, AIModel
 # --- Import new state utils ---
 from .state_utils import get_stop_requested_sync, set_stop_requested_sync, clear_stop_request_state_sync
+# --- Import response handlers ---
+from .response_handlers import extract_response_content, ResponseExtractionError
 
 logger = logging.getLogger(__name__)
 
@@ -853,111 +859,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
                                 logger.info("收到AI响应，但检测到本地终止标志，丢弃响应")
                                 raise asyncio.CancelledError("用户请求终止生成 (Local Check After Response)")
 
-                            # --- MODIFIED: Handle different Content-Types robustly ---
-                            response_data = None # For standard JSON
-                            accumulated_content = None # For accumulated stream content
-                            actual_content_type = response.content_type
-                            logger.info(f"Received response with Content-Type: {actual_content_type}")
-
-                            if actual_content_type == 'application/json':
-                                # Handle standard JSON response
-                                try:
-                                    response_data = await response.json()
-                                    logger.info("Processing standard application/json response.")
-                                except json.JSONDecodeError as json_err:
-                                    logger.error(f"Failed to decode JSON from application/json response: {json_err}")
-                                    response_text = await response.text() # Get text for logging
-                                    logger.error(f"Response text was: {response_text[:500]}...")
-                                    raise Exception("AI 服务返回了 application/json 但无法解析。") from json_err
-
-                            elif actual_content_type in ['text/event-stream', 'text/plain']:
-                                # Handle unexpected stream response when stream=False
-                                logger.warning(f"Received unexpected Content-Type '{actual_content_type}' when stream=False. Processing as a stream to accumulate content.")
-                                response_text = await response.text()
-                                accumulated_content = "" # Initialize here
-                                try:
-                                    for line in response_text.splitlines():
-                                        line = line.strip()
-                                        if not line:
-                                            continue # Skip empty lines
-                                        if line.startswith('data:'):
-                                            json_data_str = line[len('data:'):].strip()
-                                            if json_data_str.upper() == '[DONE]':
-                                                logger.info("Received [DONE] marker in stream.")
-                                                break # End of stream marker
-
-                                            if not json_data_str:
-                                                logger.warning("Received empty data line in stream.")
-                                                continue
-
-                                            try:
-                                                chunk_data = json.loads(json_data_str)
-                                                # Extract content based on common stream formats
-                                                content_part = None
-                                                if 'choices' in chunk_data and len(chunk_data['choices']) > 0:
-                                                    delta = chunk_data['choices'][0].get('delta', {})
-                                                    content_part = delta.get('content')
-
-                                                if content_part:
-                                                    accumulated_content += content_part
-                                                # else: logger.debug(f"No content found in stream chunk: {json_data_str[:100]}...")
-
-                                            except json.JSONDecodeError as chunk_err:
-                                                logger.error(f"Failed to decode JSON chunk from stream: {chunk_err} - Chunk: {json_data_str[:200]}...")
-                                                continue # Log and continue, hoping subsequent chunks are valid
-                                        else:
-                                            logger.warning(f"Received non-data line in stream: {line[:100]}...")
-
-                                    if not accumulated_content:
-                                        logger.error(f"Failed to accumulate any content from the {actual_content_type} stream. Full response text: {response_text[:500]}...")
-                                        raise Exception(f"未能从 AI 服务的 {actual_content_type} 响应流中提取有效内容。")
-
-                                    logger.info(f"Successfully accumulated content from {actual_content_type} stream.")
-                                    # accumulated_content now holds the final response
-
-                                except Exception as stream_proc_err:
-                                    logger.error(f"Error processing {actual_content_type} stream: {stream_proc_err}")
-                                    logger.error(f"Response text was: {response_text[:500]}...")
-                                    raise Exception(f"处理 AI 服务的 {actual_content_type} 响应流时出错。") from stream_proc_err
-                            else:
-                                # Handle other unexpected content types
-                                response_text = await response.text()
-                                error_msg = f"AI 服务返回了非预期的内容类型: {actual_content_type} - Body: {response_text[:500]}..."
-                                logger.error(error_msg)
-                                raise Exception(error_msg)
-                            # --- END MODIFIED ---
-
-                            # --- ADJUSTED CONTENT EXTRACTION ---
-                            # If we accumulated content from a stream, return it directly
-                            if accumulated_content is not None:
-                                return accumulated_content
-
-                            # Otherwise, process the parsed JSON data (response_data)
-                            elif response_data is not None:
-                                extracted_content = None
-                                # --- NEW: Try extracting from {'content': [{'type': 'text', 'text': ...}]} structure ---
-                                if 'content' in response_data and isinstance(response_data['content'], list) and len(response_data['content']) > 0:
-                                    first_content_item = response_data['content'][0]
-                                    if isinstance(first_content_item, dict) and first_content_item.get('type') == 'text' and 'text' in first_content_item:
-                                        extracted_content = first_content_item['text']
-                                        logger.info("Extracted content using {'content': [{'type': 'text', 'text': ...}]} structure.")
-
-                                # --- Try standard OpenAI format if the first attempt failed ---
-                                if extracted_content is None and 'choices' in response_data and len(response_data['choices']) > 0:
-                                    if 'message' in response_data['choices'][0] and 'content' in response_data['choices'][0]['message']:
-                                        extracted_content = response_data['choices'][0]['message']['content']
-                                        logger.info("Extracted content using standard OpenAI {'choices': [{'message': {'content': ...}}]} structure.")
-
-                                # --- Return content if found, otherwise raise error ---
-                                if extracted_content is not None:
-                                    return extracted_content
-                                else:
-                                    # If no content found in any expected JSON structure
-                                    logger.error(f"Could not extract content from parsed JSON response using known structures: {str(response_data)[:500]}...")
-                                    raise Exception("未能从 AI 服务的 JSON 响应中提取有效内容。")
-                            else:
-                                # This case implies an issue in the logic above (e.g., failed parsing/accumulation without raising)
-                                raise Exception("未能成功解析或处理 AI 服务的响应数据。")
+                            # --- REFACTORED: Use response_handlers module ---
+                            try:
+                                extracted_content = await extract_response_content(response)
+                                return extracted_content
+                            except ResponseExtractionError as extract_err:
+                                # Log the specific extraction error and raise a generic Exception
+                                # for the retry mechanism in process_ai_response
+                                logger.error(f"内容提取失败: {extract_err}")
+                                raise Exception(f"未能从AI服务响应中提取有效内容: {extract_err}") from extract_err
+                            # --- END REFACTORED ---
 
                         # Handle non-200 responses
                         elif response.status != 200:
@@ -977,21 +888,26 @@ class ChatConsumer(AsyncWebsocketConsumer):
             logger.info("AI请求被取消")
             raise  # 重新抛出取消异常
         except Exception as e:
-            logger.error(f"发送请求到AI服务失败: {str(e)}")
+            # Catch other exceptions including the one raised from ResponseExtractionError
+            logger.error(f"发送请求到AI服务或处理响应时失败: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
 
-            # 针对超时错误提供更具体的错误信息
+            # 针对特定错误类型提供更具体的错误信息
             error_message = str(e)
             if isinstance(e, asyncio.TimeoutError) or "TimeoutError" in error_message:
                 error_msg = "AI服务响应超时，这可能是因为模型生成内容需要更长时间。请稍后再试或考虑简化您的请求。"
-                raise asyncio.TimeoutError(error_msg)
-            elif "CancelledError" in error_message:
-                error_msg = "请求被取消，可能是因为连接中断或用户请求终止。"
-                raise asyncio.CancelledError(error_msg)
+                raise asyncio.TimeoutError(error_msg) from e
+            elif isinstance(e, asyncio.CancelledError) or "CancelledError" in error_message:
+                 error_msg = "请求被取消，可能是因为连接中断或用户请求终止。"
+                 raise asyncio.CancelledError(error_msg) from e
+            elif isinstance(e.__cause__, ResponseExtractionError): # Check if the cause was our custom error
+                # Use the message from the ResponseExtractionError if available
+                error_msg = f"处理AI服务响应时出错: {e.__cause__}"
+                raise Exception(error_msg) from e # Raise generic Exception for retry
             else:
-                error_msg = "与AI服务通信时发生错误，请稍后重试。"
-                raise Exception(error_msg)
+                error_msg = "与AI服务通信或处理响应时发生错误，请稍后重试。"
+                raise Exception(error_msg) from e
 
     async def send_status_message(self, message, clear=False):
         """发送状态消息到WebSocket"""
