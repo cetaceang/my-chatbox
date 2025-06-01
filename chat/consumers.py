@@ -934,21 +934,32 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
                             # Otherwise, process the parsed JSON data (response_data)
                             elif response_data is not None:
-                                if 'choices' in response_data and len(response_data['choices']) > 0:
-                                    # Handle standard OpenAI format
-                                    if 'message' in response_data['choices'][0] and 'content' in response_data['choices'][0]['message']:
-                                        return response_data['choices'][0]['message']['content']
-                                # Add handling for other potential JSON structures if needed
-                                # elif 'role' in response_data and 'content' in response_data: ...
+                                extracted_content = None
+                                # --- NEW: Try extracting from {'content': [{'type': 'text', 'text': ...}]} structure ---
+                                if 'content' in response_data and isinstance(response_data['content'], list) and len(response_data['content']) > 0:
+                                    first_content_item = response_data['content'][0]
+                                    if isinstance(first_content_item, dict) and first_content_item.get('type') == 'text' and 'text' in first_content_item:
+                                        extracted_content = first_content_item['text']
+                                        logger.info("Extracted content using {'content': [{'type': 'text', 'text': ...}]} structure.")
 
-                                # If no content found in expected JSON structure
-                                logger.error(f"Could not extract content from parsed JSON response: {str(response_data)[:500]}...")
-                                raise Exception("未能从 AI 服务的 JSON 响应中提取有效内容。")
+                                # --- Try standard OpenAI format if the first attempt failed ---
+                                if extracted_content is None and 'choices' in response_data and len(response_data['choices']) > 0:
+                                    if 'message' in response_data['choices'][0] and 'content' in response_data['choices'][0]['message']:
+                                        extracted_content = response_data['choices'][0]['message']['content']
+                                        logger.info("Extracted content using standard OpenAI {'choices': [{'message': {'content': ...}}]} structure.")
+
+                                # --- Return content if found, otherwise raise error ---
+                                if extracted_content is not None:
+                                    return extracted_content
+                                else:
+                                    # If no content found in any expected JSON structure
+                                    logger.error(f"Could not extract content from parsed JSON response using known structures: {str(response_data)[:500]}...")
+                                    raise Exception("未能从 AI 服务的 JSON 响应中提取有效内容。")
                             else:
                                 # This case implies an issue in the logic above (e.g., failed parsing/accumulation without raising)
                                 raise Exception("未能成功解析或处理 AI 服务的响应数据。")
 
-                        # Handle non-200 responses (moved slightly, but logic remains)
+                        # Handle non-200 responses
                         elif response.status != 200:
                              response_text = await response.text()
                              error_msg = f"AI服务响应错误: {response.status} - {response_text}"
