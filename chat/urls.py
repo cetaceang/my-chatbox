@@ -13,6 +13,8 @@ urlpatterns = [
     path('api/models/', admin_api.get_models_api, name='api-models'),
     path('api/providers/', admin_api.manage_providers_api, name='api-providers'),
     path('api/test-connection/<int:provider_id>/', admin_api.test_api_connection, name='api-test-connection'),
+    path('api/admin/users/', admin_api.list_users_api, name='api-admin-list-users'), # 新增：获取用户列表
+    path('api/admin/manage_user_ban/', admin_api.manage_user_ban_status, name='api-admin-manage-user-ban'), # 新增：管理用户封禁状态
     path('api/debug/', admin_api.debug_api_response, name='api-debug'),
     path('api/debug_response/', api.debug_response_api, name='api-debug-response'),
 

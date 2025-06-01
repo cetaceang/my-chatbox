@@ -26,6 +26,7 @@ var/
 *.pyc
 db.sqlite3
 media
+config/settings.py.bak # Ignore settings backup
 
 # Virtual Environment
 venv/
@@ -40,4 +41,4 @@ ENV/
 
 # OS
 .DS_Store
-Thumbs.db 
+Thumbs.db

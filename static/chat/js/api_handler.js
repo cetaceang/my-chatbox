@@ -643,59 +643,46 @@ function regenerateResponse(userMessageId) {
         return;
     }
 
-    // 如果已经在处理终止，不启动新的生成
-    if (window.isTerminationInProgress) {
-        console.log(`[Regen Start ${userMessageId}] 终止正在进行中，不启动新的生成`);
-        return;
-    }
+    // --- Integrate with State Manager ---
+    // Attempt to start generation for this specific userMessageId.
+    // This call now handles adding the ID to activeGenerationIds and setting isGenerating=true.
+    // The UI update logic (updateUIBasedOnState) will disable the button if the system is busy.
+    // We don't need a separate isRegenerating check here anymore.
+    window.ChatStateManager.startGeneration(userMessageId);
+    console.log(`[Regen Start ${userMessageId}] Called ChatStateManager.startGeneration. UI should reflect busy state.`);
+    // --- End State Manager Integration ---
+
+    // REMOVED check for window.isTerminationInProgress - StateManager handles busy state
 
     // Declare userMessageDiv ONCE at the beginning
     const userMessageDiv = document.querySelector(`.alert[data-message-id="${userMessageId}"], .alert[data-temp-id="${userMessageId}"]`);
     if (!userMessageDiv) {
         console.error(`[Regen Start ${userMessageId}] Could not find user message div.`);
+        // Ensure state is ended if we exit early
+        // REMOVED Deprecated call: window.ChatStateManager.endGeneration(userMessageId, true);
+        // State is now managed by generation_end WebSocket message.
         return;
     }
 
-    // --- Check if a stop was requested specifically for THIS message ---
-    // This check remains important in case the stop happened *before* this function was called
-    if (userMessageDiv.getAttribute('data-stop-requested') === 'true') {
-        console.warn(`[Regen Start ${userMessageId}] Blocked: Stop was previously requested for this specific message.`);
-        displaySystemError("此消息的停止请求正在处理中...", userMessageDiv); // More specific error
-        return; // Prevent regeneration from starting
-    }
-    // --- End specific stop check ---
+    // --- REMOVED redundant client-side stop check ---
+    // Backend and API response now handle cancellation checks.
 
-    const regenBtn = userMessageDiv.querySelector('.regenerate-btn'); // Use the existing userMessageDiv
-    if (!regenBtn) {
-        console.error("Could not find regenerate button for message ID:", userMessageId);
-        return;
+    // --- ADDED: Disable button immediately ---
+    const regenBtn = userMessageDiv.querySelector('.regenerate-btn');
+    if (regenBtn) {
+        regenBtn.disabled = true;
+        regenBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>'; // Show spinner
+        console.log(`[Regen Start ${userMessageId}] Disabled regenerate button.`);
+    } else {
+        console.warn(`[Regen Start ${userMessageId}] Could not find regenerate button to disable.`);
     }
-
-    // --- Prevent starting if already regenerating (check button attribute) ---
-    console.log(`[Regen Check ${userMessageId}] Checking data-regenerating attribute. Current value:`, regenBtn.getAttribute('data-regenerating'));
-    if (regenBtn.getAttribute('data-regenerating') === 'true') {
-        console.warn(`[Regen Check ${userMessageId}] Blocked: Regeneration for message ID ${userMessageId} is already in progress (button state). Ignoring duplicate request.`);
-        displaySystemError("请稍候，上一次请求仍在处理中...", userMessageDiv); // Show brief error
-        // No need to reset button here, the existing process's finally block should handle it.
-        return; // Stop execution
-    }
-    // --- End prevention check ---
+    // --- END ADDED ---
 
     // Clear any previous stop request flag for this message before starting
     userMessageDiv.removeAttribute('data-stop-requested');
     console.log(`[Regen Start ${userMessageId}] Cleared data-stop-requested attribute.`);
 
-    // Mark button as regenerating and disable
-    regenBtn.setAttribute('data-regenerating', 'true');
-    console.log(`[Regen Start ${userMessageId}] Set data-regenerating="true".`);
-    regenBtn.classList.add('btn-processing'); // Add spinner class
-    regenBtn.disabled = true;
-    regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise animate-spin"></i>'; // Show spinner
-
-    // --- Set global generating flag ---
-    window.isGeneratingResponse = true; // Mark that *a* generation process has started
-    console.log(`[Regen Start ${userMessageId}] Set window.isGeneratingResponse = true.`);
-    // --- End setting global flag ---
+    // REMOVED setting global flag: window.isGeneratingResponse = true;
 
     console.log(`[Regen Start ${userMessageId}] Proceeding with regeneration for user message ID: ${userMessageId}`);
 
@@ -703,6 +690,13 @@ function regenerateResponse(userMessageId) {
     if (!modelSelect) {
          console.error("Model select dropdown not found.");
          alert("无法找到模型选择器，无法重新生成。");
+         // Ensure state is ended and button is reset if we exit early
+         // REMOVED Deprecated call: window.ChatStateManager.endGeneration(userMessageId, true);
+         // State is now managed by generation_end WebSocket message.
+         if (regenBtn) { // Reset button if found
+             regenBtn.disabled = false;
+             regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+         }
          return;
     }
     const modelId = modelSelect.value;
@@ -724,19 +718,25 @@ function regenerateResponse(userMessageId) {
                     } else {
                         console.error("Still unable to resolve temp ID after sync:", userMessageId);
                         alert('无法重新生成临时消息的回复，请等待消息保存或刷新页面后重试。');
-                        // Restore button state if needed (assuming button was disabled)
-                        const userMessageDiv = document.querySelector(`.alert[data-temp-id="${userMessageId}"]`);
-                        const regenBtn = userMessageDiv?.querySelector('.regenerate-btn');
-                        if (regenBtn) {
-                             regenBtn.classList.remove('btn-processing');
-                             regenBtn.disabled = false;
-                             regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+                        // Ensure state is ended and button is reset if we exit early
+                        // REMOVED Deprecated call: window.ChatStateManager.endGeneration(userMessageId, true);
+                        // State is now managed by generation_end WebSocket message.
+                        if (regenBtn) { // Reset button if found
+                            regenBtn.disabled = false;
+                            regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
                         }
                     }
                 }, 500);
             }).catch(error => {
                 console.error("Sync failed during regenerate temp ID resolution:", error);
                 alert('同步数据失败，无法重新生成回复。请刷新页面后重试。');
+                // Ensure state is ended and button is reset if we exit early
+                // REMOVED Deprecated call: window.ChatStateManager.endGeneration(userMessageId, true);
+                // State is now managed by generation_end WebSocket message.
+                if (regenBtn) { // Reset button if found
+                    regenBtn.disabled = false;
+                    regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+                }
             });
             return; // Exit early, wait for sync/retry
         }
@@ -744,44 +744,53 @@ function regenerateResponse(userMessageId) {
     }
 
     const messageContainer = document.querySelector('#message-container');
-    if (!messageContainer) {
-        console.error("Message container not found.");
-        // Restore button state before returning
-        if (regenBtn) {
-            regenBtn.removeAttribute('data-regenerating');
-            regenBtn.classList.remove('btn-processing');
-            regenBtn.disabled = false;
-            regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+        if (!messageContainer) {
+            console.error("Message container not found.");
+            // Mark regeneration as ended with error in StateManager
+            ChatStateManager.endRegeneration(userMessageId, true);
+            // REMOVED direct button restoration
+            return;
         }
-        return;
-    }
 
-    // --- REMOVED Redundant declaration of userMessageDiv ---
+        // --- REMOVED Redundant declaration of userMessageDiv ---
     // We already declared userMessageDiv at the top using the initial userMessageId.
     // If it was a temp ID, realUserMessageId will be updated, but userMessageDiv element remains the same.
     // We just need to ensure the element still exists after potential async operations.
-    if (!document.body.contains(userMessageDiv)) {
-         console.error("User message div no longer exists in DOM after resolving ID for:", realUserMessageId);
-         // Button state might already be reset by finally, or was never set if temp ID failed early
-        return;
-    }
-
-    // Remove subsequent AI messages
-    let nextElement = userMessageDiv.nextElementSibling;
-    const messagesToRemove = [];
-    while (nextElement) {
-        if (nextElement.classList.contains('alert')) {
-            if (nextElement.classList.contains('alert-secondary')) {
-                messagesToRemove.push(nextElement);
-            } else {
-                // Stop if we hit another user message
-                break;
-            }
+        if (!document.body.contains(userMessageDiv)) {
+             console.error("User message div no longer exists in DOM after resolving ID for:", realUserMessageId);
+             // Ensure state is ended and button is reset if we exit early
+             // REMOVED Deprecated call: window.ChatStateManager.endGeneration(userMessageId, true);
+             // State is now managed by generation_end WebSocket message.
+             // Button might not exist if the whole message div is gone
+             // if (regenBtn) { ... } // No need to reset button if div is gone
+            return;
         }
-        nextElement = nextElement.nextElementSibling;
+
+    // Remove subsequent AI messages more robustly
+    console.log(`[Regen Start ${userMessageId}] Attempting to remove subsequent AI messages.`);
+    let nextElement = userMessageDiv.nextElementSibling;
+    let removedCount = 0;
+    while (nextElement) {
+        const currentElement = nextElement; // Store current element before advancing
+        nextElement = currentElement.nextElementSibling; // Advance pointer first
+
+        // Check if the current element is an AI message bubble
+        if (currentElement.classList.contains('alert') && currentElement.classList.contains('alert-secondary')) {
+            console.log(`[Regen Start ${userMessageId}] Removing AI message:`, currentElement.getAttribute('data-message-id') || 'No ID');
+            currentElement.remove();
+            removedCount++;
+        }
+        // Stop if we hit another user message or a non-alert element that shouldn't be there
+        else if (currentElement.classList.contains('alert') && currentElement.classList.contains('alert-primary')) {
+            console.log(`[Regen Start ${userMessageId}] Stopping removal - encountered next user message.`);
+            break;
+        } else if (!currentElement.classList.contains('alert')) {
+             console.log(`[Regen Start ${userMessageId}] Stopping removal - encountered non-alert element:`, currentElement.tagName);
+             // Optionally break here too, depending on expected structure
+             // break;
+        }
     }
-    console.log(`Removing ${messagesToRemove.length} subsequent AI message(s).`);
-    messagesToRemove.forEach(msg => msg.remove());
+    console.log(`[Regen Start ${userMessageId}] Removed ${removedCount} subsequent AI message(s).`);
 
     // Add loading indicator FIRST with unique ID
     const uniqueIndicatorId = `ai-response-loading-${userMessageId}`;
@@ -789,17 +798,7 @@ function regenerateResponse(userMessageId) {
     userMessageDiv.insertAdjacentElement('afterend', loadingDiv);
     loadingDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-    // THEN Show the stop button
-    if (typeof showStopGenerationButton === 'function') {
-        console.log("显示重新生成时的终止按钮");
-        showStopGenerationButton();
-    } else {
-        console.warn("找不到showStopGenerationButton函数");
-        // 应急处理，设置基本状态标志
-        window.isGeneratingResponse = true;
-        window.terminationRequestSent = false;
-        window.isTerminationInProgress = false;
-    }
+    // REMOVED call to showStopGenerationButton - UI handled by StateManager subscription
 
     // 发送重新生成请求
     console.log("发送重新生成请求，消息ID:", realUserMessageId);
@@ -830,186 +829,159 @@ function regenerateResponse(userMessageId) {
         })
         .then(data => {
             console.log("重新生成响应数据:", data);
-            
-            // 检查是否终止
-            const stopRequestedForThis = isStopRequestedForMessage(userMessageId);
-            if (window.isTerminationInProgress || stopRequestedForThis) {
-                console.log(`[Regen Success ${userMessageId}] 忽略响应。终止进行中: ${window.isTerminationInProgress}, 此消息请求终止: ${stopRequestedForThis}`);
-                
-                // 如果没有其他活跃的重新生成，隐藏停止按钮
-                if (!document.querySelector('.regenerate-btn[data-regenerating="true"]')) {
-                    console.log(`[Regen Success ${userMessageId}] 没有其他活跃的重新生成。调用hideStopGenerationButton。`);
-                    if (typeof hideStopGenerationButton === 'function') hideStopGenerationButton();
-                }
-                return;
-            }
-            
-            // 处理成功响应
-            if (data.success) {
-                console.log(`[Regen Success ${userMessageId}] Rendering new message ID: ${data.message_id}`);
 
-                // --- 在插入新消息前，移除本次重新生成对应的加载指示器 ---
-                const uniqueIndicatorId = `ai-response-loading-${userMessageId}`;
+            // --- ADDED: Check for cancellation status first ---
+            if (data.status === 'cancelled') {
+                 console.log(`[Regen Cancelled ${userMessageId}] Received cancellation status from API: ${data.message || '用户终止'}`);
+                 // Mark generation as ended (not an error)
+                 // REMOVED Deprecated call: window.ChatStateManager.endGeneration(userMessageId, false);
+                 // State is now managed by generation_end WebSocket message.
+                 // Ensure loading indicator is removed (might have been removed already, but double-check)
+                 const uniqueIndicatorId = `ai-response-loading-${userMessageId}`;
                 const loadingIndicator = document.getElementById(uniqueIndicatorId);
                 if (loadingIndicator && loadingIndicator.parentNode) {
                     loadingIndicator.remove();
-                    console.log(`[Regen Success ${userMessageId}] 已移除加载指示器: ${uniqueIndicatorId}`);
-                } else {
-                    // 如果找不到特定ID的指示器，尝试移除通用的指示器（作为后备）
-                    const genericLoadingIndicator = document.getElementById('ai-response-loading');
-                    if (genericLoadingIndicator && genericLoadingIndicator.parentNode) {
-                        genericLoadingIndicator.remove();
-                         console.warn(`[Regen Success ${userMessageId}] 未找到特定加载指示器 ${uniqueIndicatorId}，但移除了通用指示器`);
-                    } else {
-                        console.warn(`[Regen Success ${userMessageId}] 无法找到要移除的加载指示器: ${uniqueIndicatorId}`);
-                    }
-                }
-                // --- 结束移除加载指示器 ---
+                    console.log(`[Regen Cancelled ${userMessageId}] Removed loading indicator.`);
+                 }
+                 // --- ADDED: Reset button on cancellation ---
+                 if (regenBtn) {
+                     regenBtn.disabled = false;
+                     regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+                     console.log(`[Regen Cancelled ${userMessageId}] Reset regenerate button.`);
+                 }
+                 // --- END ADDED ---
+                 return; // Stop further processing
+             }
+            // --- END ADDED CHECK ---
+            
+            // Check if termination was requested *during* the API call via StateManager
+             if (window.ChatStateManager.getState('isStopping')) { // Explicit window call
+                  console.log(`[Regen Success ${userMessageId}] Ignoring response. StateManager indicates stopping.`);
+                  // Mark generation as ended (technically successful API call, but stopped)
+                  // REMOVED Deprecated call: window.ChatStateManager.endGeneration(userMessageId, false); // Use endGeneration, mark as not an error
+                  // State is now managed by generation_end WebSocket message.
+                  // UI will update via subscription
+                  return;
+            }
+            // REMOVED check for window.isTerminationInProgress and isStopRequestedForMessage
 
-                const aiMessageDiv = createAIMessageDiv(data.content, data.message_id, data.timestamp);
-                // Ensure userMessageDiv still exists before inserting after it
-                if (document.body.contains(userMessageDiv)) {
-                    userMessageDiv.insertAdjacentElement('afterend', aiMessageDiv);
-                    renderMessageContent(aiMessageDiv); // Render the new message
-                    aiMessageDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                } else {
-                     console.warn(`[Regen Success ${userMessageId}] User message div disappeared before AI response could be inserted.`);
-                }
+            // --- 移除加载指示器 (无论成功或失败，只要收到响应就移除) ---
+            const uniqueIndicatorId = `ai-response-loading-${userMessageId}`;
+            const loadingIndicator = document.getElementById(uniqueIndicatorId);
+            if (loadingIndicator && loadingIndicator.parentNode) {
+                loadingIndicator.remove();
+                console.log(`[Regen Response ${userMessageId}] Removed loading indicator: ${uniqueIndicatorId}`);
             } else {
-                // Handle backend errors (e.g., explicit termination message from API, other errors)
-                console.error(`[Regen Fail ${userMessageId}] Regeneration failed: ${data.message}`);
-                // Display error ONLY IF it's not a user termination message from the API itself
-                if (data.message !== '生成已被用户终止') {
-                    displaySystemError(`重新生成回复失败: ${data.message}`, userMessageDiv);
+                // Fallback removal attempt (less likely needed now with unique IDs)
+                const genericLoadingIndicator = document.getElementById('ai-response-loading');
+                if (genericLoadingIndicator && genericLoadingIndicator.parentNode) {
+                    genericLoadingIndicator.remove();
+                    console.warn(`[Regen Response ${userMessageId}] Removed generic loading indicator (fallback).`);
                 } else {
-                    console.log(`[Regen Fail ${userMessageId}] Regeneration terminated by user (API response). Skipping system error display.`);
-                    
-                    // 特殊处理服务器返回的"生成已被用户终止"消息
-                    console.log(`[Regen Fail ${userMessageId}] 收到生成被终止的消息，强制重置所有状态`);
-                    
-                    // 清除任何活跃的重新生成标志
-                    const allRegenBtns = document.querySelectorAll('.regenerate-btn[data-regenerating="true"]');
-                    allRegenBtns.forEach(btn => {
-                        btn.removeAttribute('data-regenerating');
-                        btn.classList.remove('btn-processing');
-                        btn.disabled = false;
-                        btn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
-                    });
-                    
-                    // 使用hideStopGenerationButton重置所有状态
-                    if (typeof hideStopGenerationButton === 'function') {
-                        hideStopGenerationButton();
-                    } else {
-                        // 备用方案：直接重置状态变量
-                        window.isGeneratingResponse = false;
-                        window.terminationRequestSent = false;
-                        window.isTerminationInProgress = false;
-                        console.log(`[Regen Fail ${userMessageId}] 已强制重置状态变量`);
-                    }
-                    
-                    // 移除加载指示器
-                    const uniqueIndicatorId = `ai-response-loading-${userMessageId}`;
-                    const loadingIndicator = document.getElementById(uniqueIndicatorId);
-                    if (loadingIndicator && loadingIndicator.parentNode) {
-                        loadingIndicator.remove();
-                    }
-                    
-                    // 提前返回，不执行后续检查
-                    return;
+                    console.warn(`[Regen Response ${userMessageId}] Could not find loading indicator to remove: ${uniqueIndicatorId}`);
                 }
             }
-            
-            // 检查是否还有其他活跃的重新生成
-            if (!document.querySelector('.regenerate-btn[data-regenerating="true"]:not([data-message-id="' + userMessageId + '"])')) {
-                console.log(`[Regen Success/Fail ${userMessageId}] 没有其他活跃的重新生成。调用hideStopGenerationButton。`);
-                if (typeof hideStopGenerationButton === 'function') hideStopGenerationButton();
+            // --- 结束移除加载指示器 ---
+
+            // 处理成功响应
+            if (data.success) {
+                console.log(`[Regen Success ${userMessageId}] API response received for new message ID: ${data.message_id}`);
+                // REMOVED Deprecated call: window.ChatStateManager.endGeneration(userMessageId, false);
+                // State is now managed by generation_end WebSocket message.
+
+                // --- ADDED: Reset button on success ---
+                if (regenBtn) {
+                    regenBtn.disabled = false;
+                    regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+                    console.log(`[Regen Success ${userMessageId}] Reset regenerate button.`);
+                }
+                // --- END ADDED ---
+
+                // --- REMOVED indicator removal from here ---
+                // Indicator removal is handled earlier now
+
+                // --- REMOVED Manual Message Rendering ---
+                // The message will be rendered when received via WebSocket
+                console.log(`[Regen Success ${userMessageId}] API call successful. Message ${data.message_id} saved. Waiting for WebSocket message to render.`);
+                // const aiMessageDiv = createAIMessageDiv(data.content, data.message_id, data.timestamp);
+                // // Ensure userMessageDiv still exists before inserting after it
+                // if (document.body.contains(userMessageDiv)) {
+                //     userMessageDiv.insertAdjacentElement('afterend', aiMessageDiv);
+                //     renderMessageContent(aiMessageDiv); // Render the new message
+                //     aiMessageDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                // } else {
+                //     console.warn(`[Regen Success ${userMessageId}] User message div disappeared before AI response could be inserted.`);
+                // }
+                // --- END REMOVED Manual Message Rendering ---
             } else {
-                console.log(`[Regen Success/Fail ${userMessageId}] 其他重新生成仍然活跃。保持停止按钮可见。`);
+                // Handle backend errors
+                console.error(`[Regen Fail ${userMessageId}] Regeneration failed: ${data.message}`);
+                // REMOVED Deprecated call: window.ChatStateManager.endGeneration(userMessageId, true);
+                // State is now managed by generation_end WebSocket message.
+                // --- ADDED: Reset button on backend failure ---
+                if (regenBtn) {
+                    regenBtn.disabled = false;
+                    regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+                    console.log(`[Regen Fail ${userMessageId}] Reset regenerate button.`);
+                }
+                // --- END ADDED ---
+                // Display error (unless it was a user termination reported by API)
+                // No need to check for '生成已被用户终止' here anymore, as the indicator is already removed.
+                // Just display the error received from the backend.
+                displaySystemError(`重新生成回复失败: ${data.message}`, userMessageDiv);
+                console.log(`[Regen Fail ${userMessageId}] Displayed error message.`); // Log error display
+                // REMOVED erroneous 'else' block related to termination check
             }
         })
         .catch(error => {
             console.error('重新生成响应出错:', error);
-            
-            // 重试逻辑
-            if (retryCount < maxRetries && !window.isTerminationInProgress) {
+            // Ensure generation ends in state manager even if retrying fails?
+            // NO - Rely on WebSocket generation_end or timeout mechanism if implemented.
+            // REMOVED Deprecated call: window.ChatStateManager.endGeneration(userMessageId, true);
+
+            // 重试逻辑 (Keep retry logic, but check StateManager's stopping state)
+            if (retryCount < maxRetries && !window.ChatStateManager.getState('isStopping')) { // Explicit window call
                 retryCount++;
                 console.log(`重新生成请求失败，尝试重试 #${retryCount}/${maxRetries}`);
                 setTimeout(() => {
-                    sendRegenerateRequest();
+                    // Before retrying, ensure regeneration hasn't been stopped in the meantime
+                    if (!window.ChatStateManager.getState('isStopping') && window.ChatStateManager.isRegenerating(userMessageId)) { // Explicit window calls
+                         sendRegenerateRequest();
+                    } else {
+                         console.log(`[Regen Retry Aborted ${userMessageId}] Stopping state changed or regeneration ended before retry.`);
+                    }
                 }, 1000 * retryCount); // 每次重试增加延迟
-                return;
+                return; // Don't execute further catch logic if retrying
             }
-            
-            console.log(`[regenerateResponse .catch] 捕获错误。isTerminationInProgress = ${window.isTerminationInProgress}`);
-            
+
+            console.log(`[regenerateResponse .catch] 捕获错误。StateManager stopping = ${window.ChatStateManager.getState('isStopping')}`); // Explicit window call
+
             // 移除加载指示器
             const uniqueIndicatorId = `ai-response-loading-${userMessageId}`;
             const loadingIndicator = document.getElementById(uniqueIndicatorId);
-            if (loadingIndicator) {
-                setTimeout(() => {
-                    if (loadingIndicator.parentNode) {
-                        loadingIndicator.remove();
-                        console.log("[Regen .catch] 延迟后移除加载指示器。");
-                    }
-                }, 300);
+            if (loadingIndicator && loadingIndicator.parentNode) {
+                 loadingIndicator.remove();
+                 console.log("[Regen .catch] Removed loading indicator.");
             }
-            
-            // 显示错误消息
-            const errorMsg = `重新生成失败: ${error.message || '未知错误'}`;
-            
-            // 重置重新生成按钮状态
-            const regenBtn = document.querySelector(`.regenerate-btn[data-message-id="${userMessageId}"]`);
-            if (regenBtn) {
-                regenBtn.removeAttribute('data-regenerating');
-                regenBtn.classList.remove('btn-processing');
-                regenBtn.disabled = false;
-                regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
-            }
-            
-            // 检查是否还有其他活跃的重新生成
-            const otherRegenActive = !!document.querySelector('.regenerate-btn[data-regenerating="true"]');
-            if (!otherRegenActive) {
-                window.isGeneratingResponse = false;
-                console.log(`[Regen .catch ${userMessageId}] 没有其他活跃的重新生成。确保停止按钮隐藏。`);
-                if (typeof hideStopGenerationButton === 'function') hideStopGenerationButton();
-            }
-        })
-        .finally(() => {
-            // 重置重新生成按钮
-            const regenBtn = document.querySelector(`.alert[data-message-id="${userMessageId}"] .regenerate-btn, .alert[data-temp-id="${userMessageId}"] .regenerate-btn`); // More specific selector
-            if (regenBtn) {
-                regenBtn.removeAttribute('data-regenerating');
-                regenBtn.classList.remove('btn-processing');
-                regenBtn.disabled = false;
-                regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
-                console.log(`[Regen Finally ${userMessageId}] 已重置重新生成按钮状态`);
+
+            // 显示错误消息 (Only if not stopped)
+            if (!window.ChatStateManager.getState('isStopping')) { // Explicit window call
+                 const errorMsg = `重新生成失败: ${error.message || '未知错误'}`;
+                 displaySystemError(errorMsg, userMessageDiv);
             } else {
-                 console.error(`[Regen Finally ${userMessageId}] 错误：无法找到要重置的重新生成按钮！选择器: .alert[data-message-id="${userMessageId}"] .regenerate-btn`);
+                 console.log("[Regen .catch] Suppressing error display because termination is in progress.");
             }
-            
-            // 检查是否还有其他活跃的重新生成
-            // 使用强制延迟确保DOM已更新
-            setTimeout(() => {
-                // 更准确地检查是否有其他活跃的重新生成按钮
-                const activeRegenBtns = document.querySelectorAll('.regenerate-btn[data-regenerating="true"]');
-                const otherRegenActive = activeRegenBtns.length > 0;
-                
-                console.log(`[Regen Finally ${userMessageId}] 检测到${activeRegenBtns.length}个活跃的重新生成按钮`);
-                
-                if (!otherRegenActive) {
-                    console.log(`[Regen Finally ${userMessageId}] 没有其他活跃的重新生成。设置 window.isGeneratingResponse = false。`);
-                    window.isGeneratingResponse = false;
-                    console.log(`[Regen Finally ${userMessageId}] 确保停止按钮隐藏。`);
-                    if (typeof hideStopGenerationButton === 'function') hideStopGenerationButton();
-                } else {
-                    // 仍显示活跃状态，但这可能是UI状态不一致导致的
-                    console.log(`[Regen Finally ${userMessageId}] 警告：检测到${activeRegenBtns.length}个活跃的重新生成按钮，但可能是状态不一致导致的`);
-                    console.log(`[Regen Finally ${userMessageId}] 为安全起见，强制重置状态`);
-                    window.isGeneratingResponse = false;
-                    if (typeof hideStopGenerationButton === 'function') hideStopGenerationButton();
-                }
-            }, 10); // 短延迟确保DOM已更新
+
+            // --- ADDED: Reset button in final catch block ---
+            // This ensures the button is reset even if retries fail or termination happens during fetch
+            if (regenBtn) {
+                regenBtn.disabled = false;
+                regenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+                console.log(`[Regen .catch ${userMessageId}] Reset regenerate button in final catch.`);
+            }
+            // --- END ADDED ---
         });
+        // REMOVED finally block - StateManager handles final state updates via endRegeneration
     }
     
     // 启动请求

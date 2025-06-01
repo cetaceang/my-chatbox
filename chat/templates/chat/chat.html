@@ -85,14 +85,16 @@
 
 <!-- Load External JavaScript Modules -->
 <!-- utils.js contains shared functions and needs to be loaded first -->
-<script src="{% static 'chat/js/utils.js' %}"></script>
+<script defer src="{% static 'chat/js/utils.js' %}"></script>
+<!-- state_manager.js should be loaded early -->
+<script defer src="{% static 'chat/js/state_manager.js' %}"></script>
 <!-- message_renderer.js depends on utils.js (escapeHtml) -->
-<script src="{% static 'chat/js/message_renderer.js' %}"></script>
+<script defer src="{% static 'chat/js/message_renderer.js' %}"></script>
 <!-- websocket_handler.js depends on utils.js and message_renderer.js -->
-<script src="{% static 'chat/js/websocket_handler.js' %}"></script>
+<script defer src="{% static 'chat/js/websocket_handler.js' %}"></script>
 <!-- api_handler.js depends on utils.js and message_renderer.js -->
-<script src="{% static 'chat/js/api_handler.js' %}"></script>
+<script defer src="{% static 'chat/js/api_handler.js' %}"></script>
 <!-- chat_page.js orchestrates everything and should be loaded last -->
-<script src="{% static 'chat/js/chat_page.js' %}"></script>
+<script defer src="{% static 'chat/js/chat_page.js' %}"></script>
 
 {% endblock %}

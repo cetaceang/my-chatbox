@@ -45,7 +45,9 @@ class Conversation(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
     sync_id = models.UUIDField(default=uuid.uuid4, unique=True, verbose_name="同步标识符")
-    
+    # 新增字段，用于跟踪当前API驱动的生成ID
+    current_generation_id = models.UUIDField(null=True, blank=True, editable=False, help_text="当前正在处理的API生成的唯一ID")
+
     class Meta:
         verbose_name = "对话"
         verbose_name_plural = "对话"

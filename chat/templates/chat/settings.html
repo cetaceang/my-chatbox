@@ -1,6 +1,10 @@
 {% extends "base.html" %}
+{% load static %} {# Add load static tag #}
 
 {% block title %}设置 - My Chat App{% endblock %}
+
+{# Add user ID to body data attribute for JS access #}
+{% block body_attributes %}data-user-id="{{ request.user.id }}"{% endblock %}
 
 {% block content %}
 <div class="container py-4">
@@ -136,35 +140,33 @@
             <div class="card">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <span>用户管理</span>
+                    <button id="refresh-user-list-btn" class="btn btn-sm btn-outline-secondary">刷新</button>
                 </div>
                 <div class="card-body">
-                    <div class="alert alert-info mb-3">
-                        <p class="mb-0">管理员用户可以管理服务提供商和AI模型。</p>
+                    <div class="table-responsive">
+                        <table class="table table-hover align-middle">
+                            <thead>
+                                <tr>
+                                    <th>用户名</th>
+                                    <th>邮箱</th>
+                                    <th>注册时间</th>
+                                    <th>状态</th>
+                                    <th>封禁到期</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="user-list-table-body">
+                                <!-- 用户列表将通过JS加载 -->
+                                <tr><td colspan="6" class="text-center text-muted">加载中...</td></tr>
+                            </tbody>
+                        </table>
                     </div>
-                    
-                    <div class="list-group" id="user-list">
-                        {% for user in users %}
-                        <div class="list-group-item d-flex justify-content-between align-items-center" data-user-id="{{ user.id }}">
-                            <div>
-                                <h6 class="mb-1">{{ user.username }}</h6>
-                                <p class="mb-1 small text-muted">注册时间：{{ user.date_joined|date:"Y-m-d H:i" }}</p>
-                            </div>
-                            <div class="d-flex align-items-center">
-                                <div class="form-check form-switch me-3">
-                                    <input class="form-check-input user-admin-toggle" type="checkbox" {% if user.is_admin %}checked{% endif %}>
-                                    <label class="form-check-label">管理员</label>
-                                </div>
-                                {% if user.id != current_user.id %}
-                                <button class="btn btn-sm btn-outline-danger delete-user-btn">删除</button>
-                                {% endif %}
-                            </div>
-                        </div>
-                        {% empty %}
-                        <div class="text-center p-3">
-                            <p class="text-muted">暂无用户</p>
-                        </div>
-                        {% endfor %}
-                    </div>
+                    <!-- 分页控件 -->
+                    <nav aria-label="用户分页">
+                        <ul class="pagination justify-content-center" id="user-pagination">
+                            <!-- 分页按钮将通过JS加载 -->
+                        </ul>
+                    </nav>
                 </div>
             </div>
         </div>
@@ -174,6 +176,31 @@
 
 <!-- 模态框 -->
 {% if is_admin %}
+<!-- 封禁用户模态框 -->
+<div class="modal fade" id="banUserModal" tabindex="-1" aria-labelledby="banUserModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="banUserModalLabel">封禁用户</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>确定要封禁用户 <strong id="ban-username-display"></strong> 吗？</p>
+                <input type="hidden" id="ban-user-id-input">
+                <div class="mb-3">
+                    <label for="ban-duration-days" class="form-label">封禁时长 (天)</label>
+                    <input type="number" class="form-control" id="ban-duration-days" min="0" value="0">
+                    <div class="form-text">输入 0 表示永久封禁。</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger" id="confirm-ban-btn">确认封禁</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div class="modal fade" id="providerModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
@@ -261,426 +288,6 @@
 {% endblock %}
 
 {% block extra_js %}
-<script>
-    // 从localStorage获取保存的会话ID
-    function getStoredConversationId() {
-        const id = localStorage.getItem('currentConversationId');
-        console.log("从localStorage获取的会话ID:", id);
-        return id;
-    }
-    
-    // 处理返回聊天按钮点击事件
-    document.getElementById('back-to-chat-btn').addEventListener('click', function() {
-        const conversationId = getStoredConversationId();
-        console.log("点击返回按钮，当前存储的会话ID:", conversationId);
-        
-        if (conversationId) {
-            // 如果有保存的会话ID，返回到该会话
-            console.log("返回到已保存的会话:", conversationId);
-            window.location.href = "{% url 'chat-main' %}?conversation_id=" + conversationId;
-        } else {
-            // 否则返回到聊天主页
-            console.log("没有保存的会话ID，返回主页");
-            window.location.href = "{% url 'chat-main' %}?no_new=1";
-        }
-    });
-    
-    // 从cookie中获取CSRF Token
-    function getCookie(name) {
-        let cookieValue = null;
-        if (document.cookie && document.cookie !== '') {
-            const cookies = document.cookie.split(';');
-            for (let i = 0; i < cookies.length; i++) {
-                const cookie = cookies[i].trim();
-                if (cookie.substring(0, name.length + 1) === (name + '=')) {
-                    cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
-                    break;
-                }
-            }
-        }
-        return cookieValue;
-    }
-    
-    // 将自己设为管理员
-    const setSelfAdminBtn = document.getElementById('set-self-admin-btn');
-    if (setSelfAdminBtn) {
-        setSelfAdminBtn.addEventListener('click', function() {
-            fetch('/users/api/manage-roles/', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': getCookie('csrftoken')
-                },
-                body: JSON.stringify({
-                    user_id: "{{ current_user.id }}",
-                    is_admin: true
-                })
-            })
-            .then(response => {
-                if (response.status === 403) {
-                    // 权限不足，可能是因为没有管理员可以授权
-                    // 创建第一个管理员的特殊处理
-                    return createFirstAdmin();
-                }
-                return response.json();
-            })
-            .then(data => {
-                if (data.success) {
-                    alert('已成功将您设为管理员！页面将刷新以应用更改。');
-                    window.location.reload();
-                } else {
-                    alert('设置失败: ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('操作出错:', error);
-                alert('操作失败，请稍后再试');
-            });
-        });
-    }
-    
-    // 创建第一个管理员的特殊处理函数
-    function createFirstAdmin() {
-        return fetch('/users/api/create-first-admin/', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': getCookie('csrftoken')
-            },
-            body: JSON.stringify({
-                user_id: "{{ current_user.id }}"
-            })
-        })
-        .then(response => response.json());
-    }
-    
-    {% if is_admin %}
-    // 服务提供商管理
-    document.getElementById('add-provider-btn').addEventListener('click', function() {
-        document.getElementById('providerModalTitle').textContent = '添加服务提供商';
-        document.getElementById('provider-id').value = '';
-        document.getElementById('provider-form').reset();
-        const providerModal = new bootstrap.Modal(document.getElementById('providerModal'));
-        providerModal.show();
-    });
-    
-    // AI模型管理
-    document.getElementById('add-model-btn').addEventListener('click', function() {
-        document.getElementById('modelModalTitle').textContent = '添加AI模型';
-        document.getElementById('model-id').value = '';
-        document.getElementById('model-form').reset();
-        const modelModal = new bootstrap.Modal(document.getElementById('modelModal'));
-        modelModal.show();
-    });
-    
-    // 保存服务提供商
-    document.getElementById('save-provider-btn').addEventListener('click', function() {
-        const providerId = document.getElementById('provider-id').value;
-        const name = document.getElementById('provider-name').value;
-        const baseUrl = document.getElementById('provider-url').value;
-        const apiKey = document.getElementById('provider-key').value;
-        const isActive = document.getElementById('provider-active').checked;
-        
-        if (!name || !baseUrl || !apiKey) {
-            alert('请填写所有必填字段');
-            return;
-        }
-        
-        const method = providerId ? 'PUT' : 'POST';
-        const data = {
-            name: name,
-            base_url: baseUrl,
-            api_key: apiKey,
-            is_active: isActive
-        };
-        
-        if (providerId) {
-            data.id = providerId;
-        }
-        
-        fetch('/chat/api/providers/', {
-            method: method,
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': getCookie('csrftoken')
-            },
-            body: JSON.stringify(data)
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                alert(data.message);
-                window.location.reload();
-            } else {
-                alert('操作失败: ' + data.message);
-            }
-        })
-        .catch(error => {
-            console.error('操作出错:', error);
-            alert('操作失败，请稍后再试');
-        });
-    });
-    
-    // 保存AI模型
-    document.getElementById('save-model-btn').addEventListener('click', function() {
-        const modelId = document.getElementById('model-id').value;
-        const providerId = document.getElementById('model-provider').value;
-        const modelName = document.getElementById('model-name').value;
-        const displayName = document.getElementById('model-display-name').value;
-        const maxContext = document.getElementById('model-context').value;
-        const maxHistory = document.getElementById('model-history').value;
-        const isActive = document.getElementById('model-active').checked;
-        
-        if (!providerId || !modelName || !displayName) {
-            alert('请填写所有必填字段');
-            return;
-        }
-        
-        const data = {
-            provider_id: providerId,
-            model_name: modelName,
-            display_name: displayName,
-            max_context: maxContext,
-            max_history_messages: maxHistory,
-            is_active: isActive
-        };
-        
-        if (modelId) {
-            data.id = modelId;
-        }
-        
-        fetch('/chat/api/models/', {
-            method: modelId ? 'PUT' : 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': getCookie('csrftoken')
-            },
-            body: JSON.stringify(data)
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                alert(data.message);
-                window.location.reload();
-            } else {
-                alert('操作失败: ' + data.message);
-            }
-        })
-        .catch(error => {
-            console.error('操作出错:', error);
-            alert('操作失败，请稍后再试');
-        });
-    });
-    
-    // 用户管理
-    document.addEventListener('change', function(e) {
-        if (e.target.classList.contains('user-admin-toggle')) {
-            const userItem = e.target.closest('.list-group-item');
-            const userId = userItem.getAttribute('data-user-id');
-            const isAdmin = e.target.checked;
-            
-            fetch('/users/api/manage-roles/', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': getCookie('csrftoken')
-                },
-                body: JSON.stringify({
-                    user_id: userId,
-                    is_admin: isAdmin
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    alert(data.message);
-                } else {
-                    // 恢复原状态
-                    e.target.checked = !isAdmin;
-                    alert('操作失败: ' + data.message);
-                }
-            })
-            .catch(error => {
-                // 恢复原状态
-                e.target.checked = !isAdmin;
-                console.error('操作出错:', error);
-                alert('操作失败，请稍后再试');
-            });
-        }
-    });
-    
-    // 删除用户
-    document.addEventListener('click', function(e) {
-        if (e.target.classList.contains('delete-user-btn')) {
-            const userItem = e.target.closest('.list-group-item');
-            const userId = userItem.getAttribute('data-user-id');
-            const username = userItem.querySelector('h6').textContent;
-            
-            if (confirm(`确定要删除用户 ${username} 吗？此操作不可恢复。`)) {
-                fetch('/users/api/manage-roles/', {
-                    method: 'DELETE',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRFToken': getCookie('csrftoken')
-                    },
-                    body: JSON.stringify({
-                        user_id: userId
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        alert(data.message);
-                        // 从DOM中移除用户项
-                        userItem.remove();
-                    } else {
-                        alert('删除失败: ' + data.message);
-                    }
-                })
-                .catch(error => {
-                    console.error('删除出错:', error);
-                    alert('删除失败，请稍后再试');
-                });
-            }
-        }
-    });
-    
-    // 编辑服务提供商
-    document.addEventListener('click', function(e) {
-        if (e.target.closest('.edit-provider-btn')) {
-            const providerItem = e.target.closest('.list-group-item');
-            const providerId = providerItem.getAttribute('data-provider-id');
-            
-            // 获取服务提供商详情
-            fetch(`/chat/api/providers/?id=${providerId}`, {
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json',
-                }
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.providers && data.providers.length > 0) {
-                    const provider = data.providers[0];
-                    document.getElementById('providerModalTitle').textContent = '编辑服务提供商';
-                    document.getElementById('provider-id').value = provider.id;
-                    document.getElementById('provider-name').value = provider.name;
-                    document.getElementById('provider-url').value = provider.base_url;
-                    document.getElementById('provider-active').checked = provider.is_active;
-                    
-                    const providerModal = new bootstrap.Modal(document.getElementById('providerModal'));
-                    providerModal.show();
-                } else {
-                    alert('获取服务提供商详情失败');
-                }
-            })
-            .catch(error => {
-                console.error('获取服务提供商详情出错:', error);
-                alert('获取服务提供商详情失败，请稍后再试');
-            });
-        }
-        
-        // 删除服务提供商
-        if (e.target.closest('.delete-provider-btn')) {
-            const providerItem = e.target.closest('.list-group-item');
-            const providerId = providerItem.getAttribute('data-provider-id');
-            
-            if (confirm('确定要删除此服务提供商吗？相关的AI模型也将被删除。')) {
-                fetch('/chat/api/providers/', {
-                    method: 'DELETE',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRFToken': getCookie('csrftoken')
-                    },
-                    body: JSON.stringify({
-                        id: providerId
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        alert(data.message);
-                        window.location.reload();
-                    } else {
-                        alert('删除失败: ' + data.message);
-                    }
-                })
-                .catch(error => {
-                    console.error('删除出错:', error);
-                    alert('删除失败，请稍后再试');
-                });
-            }
-        }
-        
-        // 编辑AI模型
-        if (e.target.closest('.edit-model-btn')) {
-            const modelItem = e.target.closest('.list-group-item');
-            const modelId = modelItem.getAttribute('data-model-id');
-            
-            // 获取模型详情
-            fetch(`/chat/api/models/?id=${modelId}`, {
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json',
-                }
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.models && data.models.length > 0) {
-                    const model = data.models[0];
-                    document.getElementById('modelModalTitle').textContent = '编辑AI模型';
-                    document.getElementById('model-id').value = model.id;
-                    document.getElementById('model-provider').value = model.provider_id;
-                    document.getElementById('model-name').value = model.model_name;
-                    document.getElementById('model-display-name').value = model.display_name;
-                    document.getElementById('model-context').value = model.max_context;
-                    document.getElementById('model-history').value = model.max_history_messages;
-                    document.getElementById('model-active').checked = model.is_active;
-                    
-                    const modelModal = new bootstrap.Modal(document.getElementById('modelModal'));
-                    modelModal.show();
-                } else {
-                    alert('获取模型详情失败');
-                }
-            })
-            .catch(error => {
-                console.error('获取模型详情出错:', error);
-                alert('获取模型详情失败，请稍后再试');
-            });
-        }
-        
-        // 删除AI模型
-        if (e.target.closest('.delete-model-btn')) {
-            const modelItem = e.target.closest('.list-group-item');
-            const modelId = modelItem.getAttribute('data-model-id');
-            
-            if (confirm('确定要删除此AI模型吗？')) {
-                fetch('/chat/api/models/', {
-                    method: 'DELETE',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRFToken': getCookie('csrftoken')
-                    },
-                    body: JSON.stringify({
-                        id: modelId
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        alert(data.message);
-                        window.location.reload();
-                    } else {
-                        alert('删除失败: ' + data.message);
-                    }
-                })
-                .catch(error => {
-                    console.error('删除出错:', error);
-                    alert('删除失败，请稍后再试');
-                });
-            }
-        }
-    });
-    {% endif %}
-</script>
-{% endblock %} 
+{# Load the dedicated JavaScript file for the settings page #}
+<script src="{% static 'chat/js/settings_page.js' %}"></script>
+{% endblock %}

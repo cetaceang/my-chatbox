@@ -9,6 +9,9 @@
 document.addEventListener("DOMContentLoaded", () => {
     console.log("Chat Page Initializing...");
 
+    // --- 移动 previousState 声明到这里 ---
+    let previousState = null; // 用于 updateUIBasedOnState 函数跟踪状态变化
+
     // Initialize tempIdMap (assuming it's defined in utils.js or globally)
     if (typeof tempIdMap === 'undefined') {
         console.warn("tempIdMap is not defined globally. Initializing locally.");
@@ -72,35 +75,62 @@ document.addEventListener("DOMContentLoaded", () => {
     // const stopGenerationBtn = document.querySelector('#stop-generation-btn'); // Removed
     // const stopGenerationContainer = document.querySelector('#stop-generation-container'); // Removed
 
-    // 全局变量，用于跟踪当前是否正在生成回复
-    window.isGeneratingResponse = false;
-    // 全局变量，用于跟踪终止状态
-    window.isTerminationInProgress = false; // Initialize flag
+    // --- Initialize State Manager ---
+    const modelSelect = document.querySelector('#model-select'); // Ensure modelSelect is defined here
+    console.log("[Chat Page] Found #model-select element:", modelSelect); // *** ADD LOG TO CHECK modelSelect ***
+    const initialModelId = modelSelect ? modelSelect.value : null;
+    
+    // *** REMOVED Debugging logs before init ***
+    
+    try {
+        // *** REMOVED Debugging logs inside try block ***
 
-    // --- Initial Setup ---
-    if (definitiveConversationId) {
-        // Existing conversation
-        initWebSocket(); // Initialize WebSocket connection (uses global conversationId)
+        window.ChatStateManager.init(definitiveConversationId, initialModelId); // Explicitly call window.ChatStateManager.init
+        console.log("ChatStateManager initialized successfully.");
+
+        // *** REMOVED Isolated getState call ***
+
+        // --- Initial Setup (Now inside try block as it depends on successful init) ---
+        // Use state manager for conversation ID check
+        // *** REMOVED Debugging logs before getState ***
+        if (window.ChatStateManager.getState('currentConversationId')) { // Explicitly call window.ChatStateManager.getState
+            // Existing conversation
+            initWebSocket(); // Initialize WebSocket connection (uses global conversationId)
         syncConversationData().catch(error => { // Initial data sync - Re-enabled
             console.error("Error during initial sync:", error);
         });
         // Ensure input/button are enabled for existing conversations
-        if (messageInput) messageInput.disabled = false;
-        if (sendButton) sendButton.disabled = false;
-        if (uploadFileBtn) uploadFileBtn.disabled = false;
+        // We'll manage enabled/disabled state based on ChatStateManager.isBusy() later
+        // if (messageInput) messageInput.disabled = false;
+        // if (sendButton) sendButton.disabled = false;
+        // if (uploadFileBtn) uploadFileBtn.disabled = false;
     } else {
         // New conversation scenario
         console.log("No conversation ID available. Ready for new conversation.");
         // Ensure input/button are enabled to allow sending the first message
-        if (messageInput) messageInput.disabled = false;
-        if (sendButton) sendButton.disabled = false;
-        if (uploadFileBtn) uploadFileBtn.disabled = false;
-        console.log("Skipping WebSocket init and sync - no conversation ID yet.");
-    }
+        // We'll manage enabled/disabled state based on ChatStateManager.isBusy() later
+        // if (messageInput) messageInput.disabled = false;
+        // if (sendButton) sendButton.disabled = false;
+        // if (uploadFileBtn) uploadFileBtn.disabled = false;
+            console.log("Skipping WebSocket init and sync - no conversation ID yet.");
+        }
+        
+        // --- Subscribe UI updater to state changes (Only if init succeeded) ---
+        window.ChatStateManager.subscribe(updateUIBasedOnState); // Explicitly call window.ChatStateManager.subscribe
 
-    // --- Event Listeners ---
+        // --- Initial UI state sync (Only if init succeeded) ---
+        updateUIBasedOnState(window.ChatStateManager.getState()); // Explicitly call window.ChatStateManager.getState
+        console.log("Initial UI state synced after successful init.");
+
+    } catch (error) {
+        console.error("[CRITICAL ERROR] Failed to initialize ChatStateManager or run initial setup:", error);
+        // Optionally display a user-facing error message here
+        // displaySystemError("页面初始化失败，请刷新重试。"); 
+    }
+    
+    // --- Event Listeners (Moved outside the try block, as they might not depend on successful init) ---
     // Elements already defined above
-    const modelSelect = document.querySelector('#model-select');
+    // const modelSelect = document.querySelector('#model-select'); // Removed redundant declaration
     const messageContainer = document.querySelector('#message-container');
     const conversationList = document.querySelector('#conversation-list');
 
@@ -127,6 +157,7 @@ document.addEventListener("DOMContentLoaded", () => {
         modelSelect.addEventListener('change', function() {
             const selectedId = this.value;
             localStorage.setItem('selectedModelId', selectedId);
+            window.ChatStateManager.setModelId(selectedId); // Explicitly call window.ChatStateManager.setModelId
             console.log(`Saved model preference: ${selectedId}`);
         });
     }
@@ -654,19 +685,21 @@ document.addEventListener("DOMContentLoaded", () => {
                 // --- Stop Generation Logic ---
                 console.log("[Stop Click] Stop button clicked.");
 
-                // --- Simplified Debounce: Check flags and disabled state ---
-                if (sendButton.disabled || window.isTerminationInProgress) {
-                    console.log(`[Stop Click] Ignoring click. Disabled: ${sendButton.disabled}, Termination in progress: ${window.isTerminationInProgress}`);
-                    return; // Ignore if already disabled or termination started
+                // --- State Check using StateManager ---
+                if (sendButton.disabled || window.ChatStateManager.getState('isStopping')) { // Explicit call
+                    console.log(`[Stop Click] Ignoring click. Button Disabled: ${sendButton.disabled}, StateManager isStopping: ${window.ChatStateManager.getState('isStopping')}`); // Explicit call
+                    return; // Ignore if already disabled or termination already requested/confirmed
                 }
-                // --- End Simplified Debounce ---
+                // --- End State Check ---
 
-                // Disable button IMMEDIATELY and set termination flag
-                sendButton.disabled = true;
-                window.isTerminationInProgress = true;
-                console.log("[Stop Click] Button disabled, isTerminationInProgress set to true.");
+                // Request stop via StateManager - this sets isStopping=true and triggers UI update
+                window.ChatStateManager.requestStop(); // Explicit call
+                console.log("[Stop Click] Called ChatStateManager.requestStop()");
+                // REMOVED direct button disable and flag setting:
+                // sendButton.disabled = true;
+                // window.isTerminationInProgress = true;
 
-                // --- Get user message ID to pass to termination display ---
+                // --- Get user message ID to pass to termination display (Keep this logic) ---
                 let userMessageIdForTermination = null;
                 // Find the *last* loading indicator (most likely the current one)
                 const indicators = document.querySelectorAll('[id^="ai-response-loading"]');
@@ -707,10 +740,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 // 立即显示终止提示 (Pass the ID)
                 displayTerminationMessage(userMessageIdForTermination);
 
-                // 发送终止请求
-                sendStopGenerationRequest(); // This function now also sets terminationRequestSent
+                // 发送终止请求 (Keep calling the function which now uses StateManager internally)
+                sendStopGenerationRequest();
 
-                // --- Mark the corresponding user message as having a stop requested ---
+                // --- Mark the corresponding user message as having a stop requested (Keep this logic) ---
                 // Use the determined userMessageIdForTermination to find the correct user message
                 let userMessageToMark = null;
                 if (userMessageIdForTermination) {
@@ -741,44 +774,39 @@ document.addEventListener("DOMContentLoaded", () => {
                     activeRegenBtn.removeAttribute('data-regenerating');
                     activeRegenBtn.classList.remove('btn-processing');
                     activeRegenBtn.disabled = false;
-                    activeRegenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+                    // REMOVED immediate reset - updateUIBasedOnState handles this when isStopping becomes true.
+                    // activeRegenBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
                 } else {
                      console.log("[Stop Click] No active regenerate button found to reset immediately.");
                 }
                 // --- End immediate reset logic ---
 
-                // 隐藏/恢复按钮状态 (hideStopGenerationButton handles this)
+                // REMOVED call to hideStopGenerationButton
                 // This resets the main Send/Stop button and global flags (isGeneratingResponse, isTerminationInProgress)
-                hideStopGenerationButton();
+                // hideStopGenerationButton(); // REMOVED - Let WebSocket handler trigger this on confirmation
 
             } else {
-                // --- Send Message Logic --- (Keep this part unchanged)
+                // --- Send Message Logic ---
                 const message = messageInput.value.trim();
                 const modelId = modelSelect.value;
-                const isNewConversation = !window.conversationId; // Check if it's a new conversation BEFORE sending
+                const isNewConversation = !window.ChatStateManager.getState('currentConversationId'); // Explicit call
 
-                // Allow sending if message is not empty AND (it's an existing conversation OR it's the first message of a new one)
-                if (message !== '' && (window.conversationId || isNewConversation)) {
+                // Allow sending if message is not empty AND not busy
+                if (message !== '' && !window.ChatStateManager.isBusy()) { // Explicit call
                     console.log("Send button clicked. Message:", message, "Model:", modelId, "Is New:", isNewConversation);
 
-                    // If it's a new conversation, enable input/button temporarily if they were disabled
-                    if (isNewConversation) {
-                        if (messageInput) messageInput.disabled = false;
-                        if (sendButton) sendButton.disabled = false;
-                    } // <-- Closing brace for if(isNewConversation)
-
-                    // --- Revised Order ---
-                    // 1. Mark generation starting
-                    window.isGeneratingResponse = true;
-                    // 2. Switch button to STOP mode (handles enabling/disabling based on termination state)
-                    showStopGenerationButton();
-                    // 3. Disable the input field
-                    messageInput.disabled = true;
-                    // --- End Revised Order ---
-                    // Redundant button disabling/styling removed as showStopGenerationButton handles it
+                    // REMOVED temporary enabling for new conversation - updateUIBasedOnState handles this
 
                     // 生成临时ID
                     const tempId = 'temp-' + Date.now();
+
+                    // Mark generation starting via StateManager
+                    window.ChatStateManager.startGeneration(tempId); // Explicit call
+                    console.log(`[Send Click] Called ChatStateManager.startGeneration for tempId: ${tempId}`);
+                    // REMOVED direct flag setting and UI updates:
+                    // window.isGeneratingResponse = true;
+                    // showStopGenerationButton();
+                    // messageInput.disabled = true;
 
                 // 使用组件工厂创建用户消息
                 const userMessageDiv = window.MessageFactory.createUserMessage(tempId, message);
@@ -788,13 +816,16 @@ document.addEventListener("DOMContentLoaded", () => {
                     messageContainer.appendChild(userMessageDiv);
                     renderMessageContent(userMessageDiv); // 渲染用户消息
                     userMessageDiv.scrollIntoView();
-                }
-
-                // 添加AI加载指示器
-                const loadingDiv = window.MessageFactory.createLoadingIndicator();
-                if (messageContainer) {
-                    messageContainer.appendChild(loadingDiv);
-                    loadingDiv.scrollIntoView();
+                 }
+ 
+                 // 添加AI加载指示器 (使用 tempId 创建唯一 ID)
+                 const uniqueIndicatorId = `ai-response-loading-${tempId}`;
+                 // 直接调用 api_handler.js 中的 createLoadingIndicator 辅助函数 (假设全局可用)
+                 // 如果不可用，需要确保该函数在 chat_page.js 之前加载或将其逻辑移至 MessageFactory
+                 const loadingDiv = createLoadingIndicator(uniqueIndicatorId); 
+                 if (messageContainer) {
+                     messageContainer.appendChild(loadingDiv);
+                     loadingDiv.scrollIntoView();
                 }
 
                 // 尝试通过WebSocket发送
@@ -883,11 +914,16 @@ document.addEventListener("DOMContentLoaded", () => {
                                 aiMessageDiv.scrollIntoView();
                             }
                             
-                            // 隐藏终止按钮，标记生成完成
-                            hideStopGenerationButton();
-                            window.isGeneratingResponse = false;
+                            // REMOVED direct call to hideStopGenerationButton and flag reset
+                            // StateManager handles state reset
+                            // window.isGeneratingResponse = false;
+                            // REMOVED Deprecated call: window.ChatStateManager.endGeneration(tempId);
+                            // State should be managed by backend signals or timeouts.
+                            console.log(`[API Success] State should be managed by backend signals or timeouts for tempId: ${tempId}`);
                         } else {
                             console.error("API错误:", data.message);
+                            // REMOVED Deprecated call: window.ChatStateManager.endGeneration(tempId, true);
+                            // State should be managed by backend signals or timeouts.
                             // 如果创建新对话失败，重置conversationId
                             if (isNewConversation) {
                                 window.conversationId = null;
@@ -900,27 +936,29 @@ document.addEventListener("DOMContentLoaded", () => {
                                 errorDiv.scrollIntoView();
                             }
                             
-                            // 隐藏终止按钮，标记生成完成
-                            hideStopGenerationButton();
-                            window.isGeneratingResponse = false;
+                            // REMOVED direct call to hideStopGenerationButton and flag reset
+                            // StateManager handles state reset
+                            // window.isGeneratingResponse = false;
                         }
                     })
                     .catch(error => {
                         console.error('通过API发送消息时出错:', error);
                         loadingDiv.remove();
-                        
+                        // REMOVED Deprecated call: window.ChatStateManager.endGeneration(tempId, true);
+                        // State should be managed by backend signals or timeouts.
+
                         // 显示错误消息
                         const errorDiv = window.MessageFactory.createErrorMessage(`发送消息失败: ${error.message}`);
                         if (messageContainer) {
                             messageContainer.appendChild(errorDiv);
                             errorDiv.scrollIntoView();
                         }
-                        
-                        // 隐藏终止按钮，标记生成完成
-                        hideStopGenerationButton();
-                        window.isGeneratingResponse = false;
+
+                        // REMOVED direct call to hideStopGenerationButton and flag reset
+                        // window.isGeneratingResponse = false;
                     })
                     .finally(() => {
+                        // Input state is now handled by updateUIBasedOnState
                         // 无论API成功或失败都重新启用输入
                         messageInput.value = '';
                         messageInput.disabled = false;
@@ -1226,7 +1264,107 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     console.log("Chat Page Initialized.");
-});
+
+    // --- Central UI Update Function ---
+    // Keep track of the previous state to detect transitions
+    // let previousState = null; // <--- 从这里移除
+    function updateUIBasedOnState(newState) {
+        console.log("[UI Update] State changed:", newState);
+        // Check if previousState has been initialized (is not undefined and not null)
+        const hasPreviousState = typeof previousState !== 'undefined' && previousState !== null;
+
+        console.log("[UI Update] State changed:", newState);
+        if (hasPreviousState) {
+            console.log("[UI Update] Previous state:", previousState);
+        } else {
+            console.log("[UI Update] Previous state: null or undefined (Initial call)");
+        }
+        const sendButton = document.querySelector('#send-button');
+        const messageInput = document.querySelector('#message-input');
+        const uploadFileBtn = document.querySelector('#upload-file-btn');
+        const allRegenBtns = document.querySelectorAll('.regenerate-btn');
+
+        if (!sendButton || !messageInput || !uploadFileBtn) {
+            console.warn("[UI Update] Required UI elements not found.");
+            return;
+        }
+
+        // Determine busy state based on new state properties
+        const isBusy = newState.isGenerating || newState.isStopping || newState.activeGenerationIds.size > 0;
+        const isGeneratingOrStopping = newState.isGenerating || newState.isStopping;
+
+        // --- Send/Stop Button Logic ---
+        if (isGeneratingOrStopping) {
+            // Switch to Stop Mode
+            if (!sendButton.classList.contains('stop-mode')) {
+                sendButton.classList.add('stop-mode', 'btn-danger');
+                sendButton.classList.remove('btn-primary');
+                sendButton.innerHTML = '<i class="bi bi-stop-fill"></i>';
+                sendButton.title = "终止生成";
+                console.log("[UI Update] Switched to Stop Mode.");
+            }
+            // Disable stop button ONLY if termination is already confirmed/in progress server-side (isStopping=true)
+            sendButton.disabled = newState.isStopping;
+        } else {
+            // Switch back to Send Mode
+            if (sendButton.classList.contains('stop-mode')) {
+                sendButton.classList.remove('stop-mode', 'btn-danger');
+                sendButton.classList.add('btn-primary');
+                sendButton.innerHTML = '<i class="bi bi-send"></i>';
+                sendButton.title = "发送消息";
+                console.log("[UI Update] Switched back to Send Mode.");
+            }
+            // Enable send button if not busy
+            sendButton.disabled = isBusy; // Simplified: disable if busy for any reason
+
+            // --- Reset stop-requested marker when stopping ends ---
+            // Check if the state transitioned *from* stopping *to* not stopping
+            // ADDED null check for previousState
+            if (previousState && previousState.isStopping && !newState.isStopping) {
+                 console.log("[UI Update] Detected transition: Stopping ended. Removing data-stop-requested attribute.");
+                 const stoppedMessage = document.querySelector('.alert.alert-primary[data-stop-requested="true"]');
+                 if (stoppedMessage) {
+                     stoppedMessage.removeAttribute('data-stop-requested');
+                     console.log("[UI Update] Removed data-stop-requested attribute from:", stoppedMessage);
+                 } else {
+                      console.warn("[UI Update] Stopping ended, but no message found with data-stop-requested attribute.");
+                 }
+            }
+            // --- End Reset stop-requested marker ---
+        }
+
+        // --- Message Input & Upload Button ---
+        // Disable if generating, stopping, or regenerating
+        messageInput.disabled = isBusy;
+        uploadFileBtn.disabled = isBusy;
+
+        // --- Regenerate Buttons (Simplified Logic) ---
+        // Disable ALL regenerate buttons if the system is busy (generating, stopping, etc.)
+        // Reset any 'processing' state if the system is no longer busy.
+        allRegenBtns.forEach(btn => {
+            btn.disabled = isBusy;
+            if (!isBusy && btn.classList.contains('btn-processing')) {
+                 // Reset button appearance if no longer busy
+                 btn.classList.remove('btn-processing');
+                 btn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+                 console.log(`[UI Update] Reset regenerate button (ID: ${btn.closest('.alert')?.getAttribute('data-message-id')}) as system is no longer busy.`);
+            } else if (isBusy && !btn.disabled) {
+                 // This case shouldn't happen if logic above is correct, but log if it does
+                 console.warn(`[UI Update] Regenerate button for ${btn.closest('.alert')?.getAttribute('data-message-id')} should be disabled but isn't.`);
+            }
+        });
+        // --- End Simplified Regenerate Buttons Logic ---
+
+        console.log(`[UI Update] Final states - Send/Stop Button Disabled: ${sendButton.disabled}, Input Disabled: ${messageInput.disabled}, Upload Disabled: ${uploadFileBtn.disabled}`);
+
+        // Update previous state for the next call
+        // Use activeGenerationIds correctly when copying
+        previousState = { ...newState, activeGenerationIds: new Set(newState.activeGenerationIds) }; // Store a copy using the correct Set name
+    }
+
+    // NOTE: UI update subscription and initial sync moved inside the try block above
+
+}); // End of DOMContentLoaded
 
 // --- Conversation List Refresh Function ---
 // Fetches the updated conversation list HTML from the server and updates the sidebar.
@@ -1468,192 +1606,100 @@ function saveMessageToServer(messageId, content, isUser) {
     });
 }
 
-// Function to switch Send button to Stop mode
-function showStopGenerationButton() {
-    const sendButton = document.querySelector('#send-button');
-    if (sendButton) {
-        console.log("切换到停止模式");
-        sendButton.classList.add('stop-mode', 'btn-danger'); // Add stop-mode and danger color
-        sendButton.classList.remove('btn-primary'); // Remove primary color
-        sendButton.innerHTML = '<i class="bi bi-stop-fill"></i>'; // Change icon (using stop-fill)
-        sendButton.title = "终止生成"; // Update tooltip
+// REMOVED old showStopGenerationButton and hideStopGenerationButton functions
+// UI updates are now handled centrally by updateUIBasedOnState
 
-        // 简化状态管理 - 只用一个主要标志
-        window.isGeneratingResponse = true;
-
-        // 只有在终止未进行时才启用按钮
-        if (!window.isTerminationInProgress) {
-            sendButton.disabled = false;
-            window.terminationRequestSent = false;
-        } else {
-            console.log("显示停止按钮时检测到终止已在进行中，保持按钮禁用状态");
-            sendButton.disabled = true;
+// 添加发送终止生成请求的函数 (Corrected Version)
+async function sendStopGenerationRequest() {
+    const conversationId = window.ChatStateManager.getState().currentConversationId;
+    if (!conversationId) {
+        console.error("[Stop Request] 无法发送终止请求：未找到会话ID");
+        // displayToast("无法发送终止请求：未找到会话ID", "error"); // REMOVED displayToast
+        // Attempt to reset UI state if something went wrong
+        if (window.ChatStateManager && typeof window.ChatStateManager.resetStoppingState === 'function') {
+            window.ChatStateManager.resetStoppingState();
         }
-
-        // 禁用所有重新生成按钮，除非它们已经在处理中
-        const allRegenBtns = document.querySelectorAll('.regenerate-btn');
-        allRegenBtns.forEach(btn => {
-            if (!btn.classList.contains('btn-processing')) {
-                btn.disabled = true;
-            }
-        });
-        console.log(`[showStopGenerationButton] 已禁用 ${allRegenBtns.length} 个重新生成按钮`);
-    } else {
-        console.warn("找不到发送/停止按钮");
+        return;
     }
-}
+    console.log(`[Stop Request] 正在发送终止生成请求到服务器，对话ID: ${conversationId}`);
 
-// Function to switch Stop button back to Send mode
-function hideStopGenerationButton() {
-    const sendButton = document.querySelector('#send-button');
-    console.log(`[hideStopGenerationButton] 被调用. isTerminationInProgress = ${window.isTerminationInProgress}`);
-    
-    if (sendButton) {
-        console.log("恢复到发送模式");
-        sendButton.classList.remove('stop-mode', 'btn-danger');
-        sendButton.classList.add('btn-primary');
-        sendButton.innerHTML = '<i class="bi bi-send"></i>';
-        sendButton.title = "发送消息";
-        sendButton.disabled = false;
+    // --- MODIFIED: Prioritize getGenerationId() ---
+    let generationIdToStop = window.ChatStateManager.getGenerationId(); // Try the single active ID first
+    console.log(`[Stop Request] Attempt 1: Got ID from getGenerationId(): ${generationIdToStop}`);
 
-        // 简化状态管理 - 一次性重置所有状态标志
-        window.isGeneratingResponse = false;
-        window.terminationRequestSent = false;
-        window.isTerminationInProgress = false;
-        console.log("[hideStopGenerationButton] 已重置所有状态标志");
+    if (!generationIdToStop) {
+        // Fallback: Try getting from the Set if the single ID wasn't available
+        console.warn("[Stop Request] getGenerationId() returned null. Falling back to activeGenerationIds Set.");
+        const activeIds = window.ChatStateManager.getState('activeGenerationIds'); // Correctly get the Set
+        if (activeIds && activeIds.size > 0) {
+            // Get the last added ID (most recent) from the Set
+            generationIdToStop = Array.from(activeIds).pop();
+            console.log(`[Stop Request] Attempt 2 (Fallback): Got ID from activeGenerationIds Set: ${generationIdToStop}`);
+        } else {
+            // --- Allow sending null ID if both methods fail ---
+            console.warn("[Stop Request] Fallback failed: No active generation ID found in Set either. Will send stop request with generation_id: null.");
+            generationIdToStop = null; // Explicitly set to null
+        }
+    }
+    // --- END MODIFIED ---
 
-        // 清除所有用户消息上的终止请求标志
-        const messageContainer = document.querySelector('#message-container');
-        if (messageContainer) {
-            const userMessages = messageContainer.querySelectorAll('.alert.alert-primary[data-stop-requested="true"]');
-            console.log(`[hideStopGenerationButton] 找到 ${userMessages.length} 条带有data-stop-requested的用户消息。正在清除标志。`);
-            userMessages.forEach(msgDiv => {
-                msgDiv.removeAttribute('data-stop-requested');
-                const msgId = msgDiv.getAttribute('data-message-id') || msgDiv.getAttribute('data-temp-id');
-                console.log(`  - 已清除消息 ${msgId} 的标志`);
+    // --- REMOVED Redundant Check ---
+    // The check for !generationIdToStop is no longer needed here,
+    // as we now explicitly allow sending null.
+    // --- END REMOVED ---
+
+
+    try {
+        // --- CORRECTED: Send directly via window.chatSocket ---
+        if (window.chatSocket && window.chatSocket.readyState === WebSocket.OPEN) {
+            const messagePayload = JSON.stringify({
+                type: 'stop_generation',
+                generation_id: generationIdToStop
             });
+            window.chatSocket.send(messagePayload);
+            console.log(`[Stop Request] WebSocket stop_generation message sent: ${messagePayload}`);
+            // Optional feedback: console.log("正在发送终止请求...");
+        } else {
+            const currentStateText = window.chatSocket ? getWebSocketStateText(window.chatSocket.readyState) : 'Not Initialized'; // Use helper if available
+            console.error(`[Stop Request] WebSocket not open or not initialized. Current state: ${currentStateText}. Cannot send stop request.`);
+            // displayToast("无法发送终止请求：连接已断开", "error"); // REMOVED displayToast
+             // Reset the UI state because we cannot send the stop request
+            if (window.ChatStateManager && typeof window.ChatStateManager.resetStoppingState === 'function') {
+                window.ChatStateManager.resetStoppingState();
+            }
+            return; // Exit if handler not available/valid
         }
 
-        // 启用所有非处理中的重新生成按钮
-        const allRegenBtns = document.querySelectorAll('.regenerate-btn');
-        allRegenBtns.forEach(btn => {
-            if (!btn.classList.contains('btn-processing')) {
-                btn.disabled = false;
-            }
-        });
-        console.log(`[hideStopGenerationButton] 已启用 ${allRegenBtns.length} 个重新生成按钮（不包括仍在处理的按钮）`);
-    } else {
-        console.warn("找不到发送/停止按钮");
-    }
-}
+        // StateManager's isStopping should already be true from the click handler calling requestStop()
 
-// 添加发送终止生成请求的函数
-function sendStopGenerationRequest() {
-    if (!window.conversationId) {
-        console.warn("没有有效的对话ID，无法发送终止请求");
-        return;
-    }
-    
-    // 检查是否已经发送过终止请求
-    if (window.terminationRequestSent) {
-        console.log("已经发送过终止请求，不再重复发送");
-        return;
-    }
-    
-    // 标记已经发送过终止请求和正在处理终止请求
-    window.terminationRequestSent = true;
-    window.isTerminationInProgress = true;
-    
-    console.log(`正在发送终止生成请求，对话ID: ${window.conversationId}`);
-    
-    // 立即清除所有加载指示器
-    const allLoadingIndicators = document.querySelectorAll('[id^="ai-response-loading-"]');
-    if (allLoadingIndicators.length > 0) {
-        console.log(`立即清除 ${allLoadingIndicators.length} 个加载指示器`);
-        allLoadingIndicators.forEach(indicator => {
-            // 将加载指示器替换为终止消息
-            const indicatorId = indicator.id;
-            const match = indicatorId.match(/ai-response-loading-(.+)/);
-            if (match && match[1]) {
-                const userMessageId = match[1];
-                displayTerminationMessage(userMessageId);
-            } else {
-                indicator.remove();
-            }
-        });
-    }
-    
-    // 检查WebSocket连接
-    let websocketSent = false;
-    if (typeof window.chatSocket !== 'undefined' && window.chatSocket && window.chatSocket.readyState === WebSocket.OPEN) {
-        console.log("通过WebSocket发送终止生成请求");
-        try {
-            window.chatSocket.send(JSON.stringify({
-                'type': 'stop_generation'
-            }));
-            websocketSent = true;
-            console.log("WebSocket终止请求已发送");
-        } catch (error) {
-            console.error("通过WebSocket发送终止请求时出错:", error);
-        }
-    } else {
-        console.warn("WebSocket不可用或未连接，无法通过WebSocket发送终止请求");
-        if (typeof window.chatSocket === 'undefined') {
-            console.warn("  原因: chatSocket未定义");
-        } else if (!window.chatSocket) {
-            console.warn("  原因: chatSocket为null");
-        } else {
-            console.warn(`  原因: chatSocket状态为 ${window.chatSocket.readyState} (OPEN=${WebSocket.OPEN})`);
+    } catch (error) {
+        console.error("[Stop Request] 发送终止生成请求时出错:", error);
+        // displayToast(`发送终止请求失败: ${error.message || error}`, "error"); // REMOVED displayToast
+        // Reset the UI state on error
+        if (window.ChatStateManager && typeof window.ChatStateManager.resetStoppingState === 'function') {
+            window.ChatStateManager.resetStoppingState();
         }
     }
-    
-    // 始终通过HTTP API发送请求作为备份
-    fetch('/chat/api/stop_generation/', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': getCookie('csrftoken')
-        },
-        body: JSON.stringify({
-            'conversation_id': window.conversationId
-        })
-    })
-    .then(response => {
-        if (!response.ok) {
-            throw new Error(`HTTP错误: ${response.status}`);
-        }
-        return response.json();
-    })
-    .then(data => {
-        console.log("终止生成请求响应:", data);
-        if (!data.success) {
-            console.warn("终止生成请求失败:", data.message);
-        } else {
-            console.log("终止生成请求成功");
-        }
-    })
-    .catch(error => {
-        console.error("发送终止生成请求时出错:", error);
-    });
 }
 
 // 显示终止消息提示 (Now accepts userMessageId)
 function displayTerminationMessage(userMessageId) {
     // Construct the unique ID to find the correct loading indicator
     const uniqueIndicatorId = userMessageId ? `ai-response-loading-${userMessageId}` : null;
-    console.log(`[displayTerminationMessage] Looking for indicator with ID: ${uniqueIndicatorId}`);
+    console.log(`[displayTerminationMessage] Attempting to find indicator with specific ID: ${uniqueIndicatorId}`);
 
     let loadingMessage = null;
     if (uniqueIndicatorId) {
         loadingMessage = document.getElementById(uniqueIndicatorId);
     }
 
-    // If specific ID wasn't found OR no ID was provided, try the generic fallback selector
+    // If specific ID wasn't found OR no ID was provided, try a more targeted fallback: find the *last* loading indicator
     if (!loadingMessage) {
-         console.warn(`[displayTerminationMessage] Indicator with specific ID "${uniqueIndicatorId}" not found or ID not provided. Trying fallback selector '[id^="ai-response-loading-"]'.`);
-         loadingMessage = document.querySelector('[id^="ai-response-loading-"]'); // Find *any* loading indicator starting with the prefix
-         if (loadingMessage) {
-             console.log(`[displayTerminationMessage] Found indicator using fallback selector: ${loadingMessage.id}`);
+         console.warn(`[displayTerminationMessage] Indicator with specific ID "${uniqueIndicatorId}" not found or ID not provided. Trying fallback: find the last element matching '[id^="ai-response-loading-"]'.`);
+         const allLoadingIndicators = document.querySelectorAll('[id^="ai-response-loading-"]');
+         if (allLoadingIndicators.length > 0) {
+             loadingMessage = allLoadingIndicators[allLoadingIndicators.length - 1]; // Get the last one
+             console.log(`[displayTerminationMessage] Found indicator using fallback (last matching element): ${loadingMessage.id}`);
          } else {
              // Log an error if no indicator is found at all
              console.error(`[displayTerminationMessage] Failed to find any loading indicator using specific ID "${uniqueIndicatorId}" or fallback selector.`);
@@ -1666,10 +1712,11 @@ function displayTerminationMessage(userMessageId) {
 
     if (loadingMessage) {
         const foundId = loadingMessage.id; // Get the actual ID found
+        const originalUserMessageId = userMessageId || foundId.replace('ai-response-loading-', ''); // Try to preserve the original ID for the termination message
         console.log(`[displayTerminationMessage] Replacing indicator ${foundId} with termination message.`);
         // 替换加载指示器为终止消息
         // Keep a unique ID for the termination message too, using the original userMessageId if available
-        loadingMessage.id = `ai-response-terminated-${userMessageId || 'unknown'}`;
+        loadingMessage.id = `ai-response-terminated-${originalUserMessageId || 'unknown'}`;
         loadingMessage.innerHTML = `
             <div class="d-flex justify-content-between">
                 <span>系统</span>

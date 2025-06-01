@@ -31,9 +31,7 @@ function getWebSocketStateText(readyState) {
 
 // Initialize WebSocket connection
 function initWebSocket() {
-    // 重置终止状态标志
-    window.terminationConfirmSent = false;
-    terminationConfirmSent = false;
+    // REMOVED old flag resets: window.terminationConfirmSent, terminationConfirmSent
     
     // Get conversation ID from the global scope or data attribute if available
     // This assumes 'conversationId' is set globally by the Django template in chat_page.js or chat.html
@@ -163,233 +161,200 @@ function initWebSocket() {
         }
         // --- End New Conversation Handling ---
 
+        // --- REMOVED Redundant generation_id handler ---
+        // setGenerationId is now handled within generation_started handler
+
         // Handle generation stopped message
         if (data.type === 'generation_stopped') {
             console.log("收到生成终止确认");
-            
-            // 检查是否已经处理过终止消息或正在处理终止请求
-            if (window.terminationConfirmSent || window.isTerminationInProgress) {
-                console.log("已经处理过终止消息或正在处理终止请求，忽略重复的终止确认");
-                return;
+
+            // Use StateManager to check if already stopped or not generating
+            if (!window.ChatStateManager.getState('isGenerating') && !window.ChatStateManager.getState('isStopping')) { // Explicit window call
+                 console.log("[WS Stop Confirm] Ignoring stop confirmation because nothing is generating or stopping according to StateManager.");
+                 return;
             }
             
-            // 标记已经处理过终止消息
-            window.terminationConfirmSent = true;
-            
-            // 立即清除所有加载指示器
-            const allLoadingIndicators = document.querySelectorAll('[id^="ai-response-loading-"]');
-            if (allLoadingIndicators.length > 0) {
-                console.log(`WebSocket终止：立即清除 ${allLoadingIndicators.length} 个加载指示器`);
-                allLoadingIndicators.forEach(indicator => {
-                    // 将加载指示器替换为终止消息
-                    const indicatorId = indicator.id;
-                    const match = indicatorId.match(/ai-response-loading-(.+)/);
-                    if (match && match[1]) {
-                        const userMessageId = match[1];
-                        if (typeof displayTerminationMessage === 'function') {
-                            displayTerminationMessage(userMessageId);
-                        } else {
-                            // 如果displayTerminationMessage未定义，简单移除指示器
-                            indicator.remove();
-                        }
-                    } else {
-                        indicator.remove();
-                    }
-                });
-            }
-            
-            // 重置所有活跃的重新生成按钮
-            const allRegenBtns = document.querySelectorAll('.regenerate-btn[data-regenerating="true"]');
-            if (allRegenBtns.length > 0) {
-                console.log(`WebSocket终止：重置 ${allRegenBtns.length} 个重新生成按钮`);
-                allRegenBtns.forEach(btn => {
-                    btn.removeAttribute('data-regenerating');
-                    btn.classList.remove('btn-processing');
-                    btn.disabled = false;
-                    btn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
-                });
-            }
-            
-            // 隐藏终止按钮
-            if (typeof hideStopGenerationButton === 'function') {
-                hideStopGenerationButton();
-            } else {
-                const stopGenerationContainer = document.querySelector('#stop-generation-container');
-                if (stopGenerationContainer) {
-                    stopGenerationContainer.style.display = 'none';
-                }
-                
-                // 直接重置全局状态
-                window.isGeneratingResponse = false;
-                window.terminationRequestSent = false;
-                window.isTerminationInProgress = false;
-                console.log("WebSocket终止：已直接重置全局状态");
-            }
-            
-            // 检查是否已经显示了终止消息
-            const existingTerminationMessage = document.getElementById('ai-response-terminated');
-            if (!existingTerminationMessage) {
-                // 如果没有显示终止消息，则显示一个
-                console.log("未检测到已有终止消息，添加一个新的终止消息");
-                
-                // 查找并移除加载指示器
-                const loadingMessage = document.getElementById('ai-response-loading');
-                if (loadingMessage) {
-                    loadingMessage.remove();
-                }
-                
-                // 显示终止消息
-                if (typeof displayTerminationMessage === 'function') {
-                    displayTerminationMessage();
-                } else {
-                    console.warn("displayTerminationMessage函数未定义，无法显示终止消息");
-                }
-            } else {
-                console.log("已存在终止消息，不再重复显示");
-            }
-            return;
+            // Confirm stop via StateManager - this resets isGenerating, isStopping, activeGenerationIds
+            window.ChatStateManager.confirmGlobalStop(); // Use the renamed function
+            // window.ChatStateManager.clearGenerationId(); // REMOVED - confirmGlobalStop already clears activeGenerationIds
+            console.log("[WS Stop Confirm] Called ChatStateManager.confirmGlobalStop(). StateManager will notify subscribers to update UI.");
+            // REMOVED redundant UI manipulation. State change notification handles UI updates.
+            return; // Stop processing here.
         }
 
-         // Handle streaming update
-         if (data.update && data.content) {
-            // 寻找最后的助手消息（可能是加载中的消息）
-            let lastAssistantMessage = messageContainer.querySelector('#ai-response-loading');
-            if (!lastAssistantMessage) {
-                // 如果没有加载中的消息，寻找最后一个次要警告框
-                const secondaryMessages = messageContainer.querySelectorAll('.alert.alert-secondary');
-                if (secondaryMessages.length > 0) {
-                    lastAssistantMessage = secondaryMessages[secondaryMessages.length - 1];
-                }
+        // --- CORRECTED: Handle generation_start (match backend log) ---
+        if (data.type === 'generation_start' && data.generation_id) { // *** CHANGED BACK: 'generation_started' to 'generation_start' ***
+            console.log(`[WS] Received generation_start signal. GenID: ${data.generation_id}, TempID: ${data.temp_id}`); // 更新日志消息
+            window.ChatStateManager.handleGenerationStart(data.generation_id);
+            window.ChatStateManager.setGenerationId(data.generation_id); // Also set the single active ID
+            // Optionally map temp_id to generation_id here if needed for UI linking
+            return; // Message handled
+        }
+        // --- END ADDED ---
+
+        // --- ADDED: Handle generation_end ---
+        if (data.type === 'generation_end' && data.generation_id) {
+            console.log(`[WS] Received generation_end signal. GenID: ${data.generation_id}, Status: ${data.status}`);
+            window.ChatStateManager.handleGenerationEnd(data.generation_id, data.status);
+            return; // Message handled
+        }
+        // --- END ADDED ---
+
+        // Handle streaming update
+        if (data.update && data.content) {
+            const generationId = data.generation_id; // Assuming backend sends this
+            const isStopping = window.ChatStateManager.getState('isStopping');
+            const isCancelled = generationId && window.ChatStateManager.isGenerationCancelled(generationId);
+
+            // --- ADDED: Enhanced Stop/Cancel Check ---
+            if (isStopping || isCancelled) {
+                const reason = isStopping ? "isStopping is true" : `generation ${generationId} is cancelled`;
+                console.log(`[WS Update] Ignoring stream update due to stop condition (${reason}). GenID: ${generationId}`);
+                return; // Discard this update
             }
+            // --- END ADDED ---
 
-            if (lastAssistantMessage) {
-                // 检查消息是否已在状态管理器中
-                const messageId = lastAssistantMessage.getAttribute('data-message-id') || '';
-                const isLoading = lastAssistantMessage.id === 'ai-response-loading';
+            // 尝试找到与此流关联的用户消息的 temp_id
+            const tempId = data.temp_id; // 假设后端在流式更新中也发送 temp_id
+            const streamingMessageId = `ai-response-streaming-${tempId || 'current'}`; // 为流式消息创建一个唯一ID
 
-                // NEW: Remove spinner on first update if it was a loading indicator
-                if (isLoading) {
-                    const spinner = lastAssistantMessage.querySelector('.spinner-border'); // Assuming this class
-                    if (spinner) {
-                        // Attempt to remove the spinner and its potential parent container if it's structured that way
-                        const spinnerContainer = spinner.closest('.text-center'); // Common pattern
-                        if (spinnerContainer) {
-                            spinnerContainer.remove();
-                            console.log("[WS] Removed spinner container from loading indicator.");
-                        } else {
-                            spinner.remove(); // Fallback to removing just the spinner
-                            console.log("[WS] Removed spinner element from loading indicator.");
-                        }
-                    }
-                    // Change ID immediately to prevent trying to remove spinner again
-                    lastAssistantMessage.id = 'ai-response-streaming'; // Use a temporary streaming ID
-                    console.log("[WS] Changed loading indicator ID to 'ai-response-streaming'.");
-                }
-                
-                if (!isLoading && messageId && window.ChatState && window.ChatState.getMessage(messageId)) {
-                    // 使用状态管理器更新消息
-                    console.log(`[WS] 使用状态管理器更新消息 ${messageId}`);
-                    const messageState = window.ChatState.getMessage(messageId);
-                    const newContent = messageState.content + data.content;
-                    
-                    // 更新状态（这将触发DOM更新）
-                    window.ChatState.updateMessage(messageId, newContent);
+            // 查找是否已存在此流式消息的 div
+            let streamingDiv = messageContainer.querySelector(`#${streamingMessageId}`);
+
+            if (!streamingDiv) {
+                // 这是此流的第一个块
+                console.log(`[WS] First stream chunk for tempId: ${tempId}. Creating new message div.`);
+
+                // 1. 查找并移除加载指示器
+                //    需要知道加载指示器的确切ID，它是在 chat_page.js 中创建的 `ai-response-loading-${tempId}`
+                const loadingIndicatorId = `ai-response-loading-${tempId}`;
+                const loadingIndicator = messageContainer.querySelector(`#${loadingIndicatorId}`);
+                if (loadingIndicator) {
+                    loadingIndicator.remove();
+                    console.log(`[WS] Removed loading indicator: #${loadingIndicatorId}`);
                 } else {
-                    // 回退到旧的更新方法
-                    console.log(`[WS] 使用传统方法更新消息`);
-                    const renderTarget = lastAssistantMessage.querySelector('p > .render-target');
-                    
-                    if (renderTarget) {
-                        // 追加新内容到原始内容属性
-                        let currentOriginal = renderTarget.getAttribute('data-original-content') || '';
-                        currentOriginal += data.content;
-                        renderTarget.setAttribute('data-original-content', currentOriginal);
-                        
-                        // 重新渲染目标span
-                        renderMessageContent(lastAssistantMessage);
-                        lastAssistantMessage.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                    } else if (isLoading) {
-                        // 如果是加载指示器，创建p和render-target
-                        const p = document.createElement('p');
-                        const span = document.createElement('span');
-                        span.className = 'render-target';
-                        span.setAttribute('data-original-content', data.content);
-                        p.appendChild(span);
-                        
-                        // 找到插入段落的位置（如hr之后）
-                        const hr = lastAssistantMessage.querySelector('hr');
-                        if (hr) {
-                            hr.insertAdjacentElement('afterend', p);
-                        } else {
-                            lastAssistantMessage.appendChild(p);
-                        }
-                        
-                        renderMessageContent(lastAssistantMessage);
-                        lastAssistantMessage.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                        
-                        // 如果存在状态管理器，注册这个消息
-                        if (window.ChatState) {
-                            console.log('[WS] 注册流式AI消息到状态管理器');
-                            window.ChatState.registerMessage(
-                                'streaming-' + Date.now(), // 临时ID
-                                data.content,
-                                false, // 不是用户消息
-                                lastAssistantMessage
-                            );
-                        }
+                    // 如果特定ID找不到，尝试移除通用的 #ai-response-loading (旧逻辑的后备)
+                    const genericLoadingIndicator = messageContainer.querySelector('#ai-response-loading');
+                    if (genericLoadingIndicator) {
+                        genericLoadingIndicator.remove();
+                        console.warn(`[WS] Removed generic loading indicator #ai-response-loading (fallback).`);
                     } else {
-                        console.warn("[WS] 未找到render-target，无法更新内容");
+                        console.warn(`[WS] Loading indicator #${loadingIndicatorId} not found.`);
                     }
                 }
+
+                // 2. 创建新的 AI 消息 div
+                streamingDiv = document.createElement('div');
+                streamingDiv.className = 'alert alert-secondary mb-3'; // 使用 mb-3 保持间距
+                streamingDiv.id = streamingMessageId; // 设置唯一ID，以便后续查找
+                streamingDiv.setAttribute('data-streaming-for', tempId || 'unknown'); // 标记它对应的用户消息
+
+                // 构建消息头部
+                const header = document.createElement('div');
+                header.className = 'd-flex justify-content-between';
+                header.innerHTML = `
+                    <span>助手</span>
+                    <div>
+                        <small>${new Date().toLocaleTimeString()}</small>
+                        <!-- 稍后在 id_update 中添加按钮 -->
+                    </div>
+                `;
+
+                // 构建分隔线和内容段落
+                const hr = document.createElement('hr');
+                const p = document.createElement('p');
+                const span = document.createElement('span');
+                span.className = 'render-target'; // 用于渲染 Markdown/LaTeX 等
+                span.setAttribute('data-original-content', data.content); // 存储原始内容
+                p.appendChild(span);
+
+                // 组装消息 div
+                streamingDiv.appendChild(header);
+                streamingDiv.appendChild(hr);
+                streamingDiv.appendChild(p);
+
+                // 添加到容器
+                messageContainer.appendChild(streamingDiv);
+                console.log(`[WS] Created new streaming message div #${streamingMessageId}`);
+
+                // 初始渲染
+                renderMessageContent(streamingDiv);
+                streamingDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
             } else {
-                console.warn("[WS] 未找到合适的助手消息来附加内容");
+                // 这是后续的流式块，追加内容
+                console.log(`[WS] Appending stream chunk to #${streamingMessageId}`);
+                const renderTarget = streamingDiv.querySelector('p > .render-target');
+                if (renderTarget) {
+                    let currentOriginal = renderTarget.getAttribute('data-original-content') || '';
+                    currentOriginal += data.content;
+                    renderTarget.setAttribute('data-original-content', currentOriginal);
+
+                    // 重新渲染更新后的内容
+                    renderMessageContent(streamingDiv);
+                    streamingDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                } else {
+                    console.warn(`[WS] Render target not found in #${streamingMessageId}`);
+                }
             }
-            return;
+            return; // 处理完毕
         }
 
         // Handle AI message ID update (after streaming completes)
         if (data.id_update && data.message_id) {
-             // Find the last assistant message which should now have content
-             const secondaryMessages = messageContainer.querySelectorAll('.alert.alert-secondary');
-             let lastAssistantMessage = null;
-             if (secondaryMessages.length > 0) {
-                  lastAssistantMessage = secondaryMessages[secondaryMessages.length - 1];
-             }
+            // 找到对应的流式消息 div
+            const tempId = data.temp_id; // 假设后端也发送 temp_id
+            const streamingMessageId = `ai-response-streaming-${tempId || 'current'}`;
+            const streamingDiv = messageContainer.querySelector(`#${streamingMessageId}`);
 
-             if (lastAssistantMessage && !lastAssistantMessage.hasAttribute('data-message-id')) { // Only update if ID is missing
-                 lastAssistantMessage.setAttribute('data-message-id', data.message_id);
-                 // Add delete button if it wasn't added during streaming finalization
-                 if (!lastAssistantMessage.querySelector('.delete-message-btn')) {
-                      const headerDiv = lastAssistantMessage.querySelector('.d-flex.justify-content-between > div');
-                      if (headerDiv) {
-                           const deleteBtn = document.createElement('button');
-                           deleteBtn.className = 'btn btn-sm btn-outline-danger delete-message-btn ms-2';
-                           deleteBtn.title = '删除消息';
-                           deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
-                           headerDiv.appendChild(deleteBtn);
-                      }
+            if (streamingDiv) {
+                console.log(`[WS] Finalizing streaming message #${streamingMessageId} with real ID ${data.message_id}`);
+                // 1. 设置最终的 data-message-id
+                streamingDiv.setAttribute('data-message-id', data.message_id);
+
+                // 2. 移除临时的 streaming ID 和标记属性
+                streamingDiv.removeAttribute('id');
+                streamingDiv.removeAttribute('data-streaming-for');
+
+                // 3. 添加操作按钮（例如删除）
+                const headerDiv = streamingDiv.querySelector('.d-flex.justify-content-between > div');
+                if (headerDiv && !headerDiv.querySelector('.delete-message-btn')) { // 避免重复添加
+                    const deleteBtn = document.createElement('button');
+                    deleteBtn.className = 'btn btn-sm btn-outline-danger delete-message-btn ms-2';
+                    deleteBtn.title = '删除消息';
+                    deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
+                    headerDiv.appendChild(deleteBtn);
+                    console.log(`[WS] Added delete button to message ${data.message_id}`);
+                }
+
+                // 4. 确保最终内容被完全渲染（以防万一）
+                renderMessageContent(streamingDiv);
+
+            } else {
+                console.warn(`[WS] ID update received for ${data.message_id}, but streaming div #${streamingMessageId} not found.`);
+                // 作为后备，尝试查找最后一个没有 message-id 的助手消息
+                const secondaryMessages = messageContainer.querySelectorAll('.alert.alert-secondary:not([data-message-id])');
+                 if (secondaryMessages.length > 0) {
+                      const lastAssistantMessage = secondaryMessages[secondaryMessages.length - 1];
+                      lastAssistantMessage.setAttribute('data-message-id', data.message_id);
+                      console.warn(`[WS] Applied ID ${data.message_id} to the last secondary message without an ID (fallback).`);
+                      // Add button here too if needed
                  }
-                 // Remove loading indicator class/ID if it was the loading div initially
-                 lastAssistantMessage.removeAttribute('id'); // Remove 'ai-response-loading' id
-                 console.log(`Updated final assistant message ID: ${data.message_id}`);
-             } else if (lastAssistantMessage) {
-                  console.log(`Assistant message already has ID: ${lastAssistantMessage.getAttribute('data-message-id')}`);
-             } else {
-                  console.warn("ID update received, but no assistant message found to update.");
-             }
-             
-             // 隐藏终止按钮，标记生成完成
-             if (typeof hideStopGenerationButton === 'function') {
-                 hideStopGenerationButton();
-             } else {
-                 const stopGenerationContainer = document.querySelector('#stop-generation-container');
-                 if (stopGenerationContainer) {
-                     stopGenerationContainer.style.display = 'none';
-                 }
-             }
-             window.isGeneratingResponse = false;
-             
-             return;
+            }
+
+            // REMOVED direct call to hideStopGenerationButton - UI handled by StateManager subscription
+            // window.isGeneratingResponse = false; // REMOVED old flag
+            // Mark generation as ended using the generation_id (if available) associated with the stream
+            // We need the backend to send generation_id in the id_update message for this to work reliably.
+            // Assuming backend sends data.generation_id in id_update:
+            // window.ChatStateManager.handleGenerationEnd(data.generation_id, 'completed'); // Call the new handler
+            // console.log(`[WS ID Update] Called ChatStateManager.handleGenerationEnd for GenID: ${data.generation_id}`);
+            // If backend doesn't send generation_id here, we can't reliably signal end via ID.
+            // The separate 'generation_end' signal becomes crucial.
+            console.log(`[WS ID Update] Finalized message ${data.message_id}. Waiting for generation_end signal.`);
+            // REMOVED call to endGeneration and clearGenerationId
+
+            return; // 处理完毕
         }
 
 
@@ -397,30 +362,70 @@ function initWebSocket() {
         // This might be less common if streaming is the primary method
         if (data.type === 'chat_message' && !data.is_user) { // Check type explicitly
             console.log("Received complete AI message via WebSocket:", data);
+            const generationId = data.generation_id; // Assuming backend sends this
+            const isStopping = window.ChatStateManager.getState('isStopping');
+            const isCancelled = generationId && window.ChatStateManager.isGenerationCancelled(generationId);
 
-            // 检查是否已显示终止消息
+            // --- ADDED: Enhanced Stop/Cancel Check ---
+            if (isStopping || isCancelled) {
+                const reason = isStopping ? "isStopping is true" : `generation ${generationId} is cancelled`;
+                console.log(`[WS ChatMsg] Ignoring final message due to stop condition (${reason}). GenID: ${generationId}`);
+                // Optionally remove loading indicator here if it wasn't removed by streaming handler
+                // Consider removing the loading indicator associated with this generation's tempId if applicable
+                const tempId = data.temp_id; // Assuming backend sends temp_id too
+                if (tempId) {
+                    const loadingIndicatorId = `ai-response-loading-${tempId}`;
+                    const loadingIndicator = document.getElementById(loadingIndicatorId);
+                    if (loadingIndicator) {
+                        loadingIndicator.remove();
+                        console.log(`[WS ChatMsg] Removed loading indicator ${loadingIndicatorId} for ignored message.`);
+                    }
+                }
+                return; // Discard this message
+            }
+            // --- END ADDED ---
+
+            // 检查是否已显示终止消息 (This check might become redundant with the StateManager check, but keep for now as fallback)
             const terminationMessage = document.getElementById('ai-response-terminated');
             if (terminationMessage || window.terminationConfirmSent) {
                 console.log("检测到终止消息已显示或已处理终止请求，不显示AI回复");
                 
-                // 隐藏终止按钮，标记生成完成
-                if (typeof hideStopGenerationButton === 'function') {
-                    hideStopGenerationButton();
-                } else {
-                    const stopGenerationContainer = document.querySelector('#stop-generation-container');
-                    if (stopGenerationContainer) {
-                        stopGenerationContainer.style.display = 'none';
-                    }
-                }
-                window.isGeneratingResponse = false;
+                // REMOVED direct call to hideStopGenerationButton - UI handled by StateManager subscription
+                // REMOVED: window.isGeneratingResponse = false;
                 return;
             }
 
-            // Remove any lingering loading indicator
-            const waitingMessage = document.getElementById('ai-response-loading');
-            if (waitingMessage) {
-                waitingMessage.remove();
-                console.log("Removed loading indicator.");
+            // Remove the correct loading indicator associated with the preceding user message
+            let loadingIndicatorRemoved = false;
+            // Find the last user message element to get its temp_id
+            const userMessages = messageContainer.querySelectorAll('.alert.alert-primary[data-temp-id]');
+            if (userMessages.length > 0) {
+                const lastUserMessage = userMessages[userMessages.length - 1];
+                const tempId = lastUserMessage.getAttribute('data-temp-id');
+                if (tempId) {
+                    const loadingIndicatorId = `ai-response-loading-${tempId}`;
+                    const loadingIndicator = document.getElementById(loadingIndicatorId);
+                    if (loadingIndicator) {
+                        loadingIndicator.remove();
+                        console.log(`[WS ChatMsg] Removed specific loading indicator: #${loadingIndicatorId}`);
+                        loadingIndicatorRemoved = true;
+                    } else {
+                        console.warn(`[WS ChatMsg] Specific loading indicator #${loadingIndicatorId} not found.`);
+                    }
+                } else {
+                    console.warn("[WS ChatMsg] Last user message found, but it has no data-temp-id.");
+                }
+            } else {
+                console.warn("[WS ChatMsg] Could not find the last user message to determine temp_id.");
+            }
+
+            // Fallback: Try removing the generic one if specific one wasn't found/removed
+            if (!loadingIndicatorRemoved) {
+                const genericLoadingIndicator = document.getElementById('ai-response-loading');
+                if (genericLoadingIndicator) {
+                    genericLoadingIndicator.remove();
+                    console.warn(`[WS ChatMsg] Removed generic loading indicator #ai-response-loading (fallback).`);
+                }
             }
 
             const messageDiv = document.createElement('div');
@@ -443,34 +448,36 @@ function initWebSocket() {
             }
 
 
+            // --- MODIFIED: Extract content from data.message object ---
+            const messageContent = (typeof data.message === 'object' && data.message !== null) ? data.message.content : data.message;
+            const messageId = (typeof data.message === 'object' && data.message !== null) ? data.message.id : data.message_id; // Get ID from object if possible
+            // --- END MODIFIED ---
+
             messageDiv.innerHTML = `
                 <div class="d-flex justify-content-between">
                     <span>助手</span>
                     <div>
                         <small>${displayTimestamp}</small>
-                        ${data.message_id ? // Only add delete button if we have an ID
+                        ${messageId ? // Use extracted messageId
                         `<button class="btn btn-sm btn-outline-danger delete-message-btn ms-2" title="删除消息">
                             <i class="bi bi-trash"></i>
                         </button>` : ''}
                     </div>
                 </div>
                 <hr>
-                <p><span class="render-target" data-original-content="${escapeHtml(data.message)}">${escapeHtml(data.message)}</span></p>
+                <p><span class="render-target" data-original-content="${escapeHtml(messageContent)}">${escapeHtml(messageContent)}</span></p>
             `;
             messageContainer.appendChild(messageDiv);
             renderMessageContent(messageDiv); // Render the content
             messageDiv.scrollIntoView();
             
-            // 隐藏终止按钮，标记生成完成
-            if (typeof hideStopGenerationButton === 'function') {
-                hideStopGenerationButton();
-            } else {
-                const stopGenerationContainer = document.querySelector('#stop-generation-container');
-                if (stopGenerationContainer) {
-                    stopGenerationContainer.style.display = 'none';
-                }
-            }
-            window.isGeneratingResponse = false;
+            // REMOVED direct call to hideStopGenerationButton - UI handled by StateManager subscription
+            // REMOVED: window.isGeneratingResponse = false;
+
+            // --- REMOVED: Call to endGeneration ---
+            // State is now managed by handleGenerationEnd triggered by the 'generation_end' signal.
+            console.log(`[WS ChatMsg] Received non-streaming message ${data.message_id}. Waiting for generation_end signal.`);
+            // --- END REMOVED ---
         }
     };
 }

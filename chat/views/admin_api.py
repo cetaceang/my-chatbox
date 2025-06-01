@@ -8,6 +8,9 @@ from django.http import JsonResponse, HttpResponseBadRequest
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.contrib.auth.decorators import login_required
+from django.contrib.auth.models import User # Added import
+from django.utils import timezone # Added import
+from datetime import timedelta # Added import
 
 from chat.models import AIProvider, AIModel
 from .utils import ensure_valid_api_url # Import from local utils
@@ -443,6 +446,159 @@ def test_api_connection(request, provider_id):
         return JsonResponse({
             'success': False,
             'message': f"处理请求失败: {str(e)}"
+        }, status=500)
+
+
+@admin_required
+@require_http_methods(["GET"])
+def list_users_api(request):
+    """
+    获取用户列表 (管理员)
+    支持分页: ?page=1&per_page=20
+    """
+    try:
+        page = request.GET.get('page', 1)
+        per_page = request.GET.get('per_page', 20)
+
+        # 查询所有用户，排除当前管理员自己，并预加载 profile 以提高效率
+        user_list = User.objects.exclude(id=request.user.id).select_related('profile').order_by('username')
+
+        # 导入 Paginator
+        from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
+
+        paginator = Paginator(user_list, per_page)
+        try:
+            users_page = paginator.page(page)
+        except PageNotAnInteger:
+            users_page = paginator.page(1)
+        except EmptyPage:
+            users_page = paginator.page(paginator.num_pages)
+
+        users_data = []
+        for user in users_page:
+            profile = getattr(user, 'profile', None) # 安全地获取 profile
+            if not profile:
+                 # 如果用户没有 profile，创建一个临时的，但这不应该发生，因为上面 get_or_create 了
+                 # 或者可以选择跳过这个用户或返回默认值
+                 profile_data = {
+                     'is_admin': False,
+                     'is_banned': False,
+                     'ban_expires_at': None,
+                     'created_at': None # 或者 user.date_joined
+                 }
+            else:
+                 profile_data = {
+                     'is_admin': profile.is_admin,
+                     'is_banned': profile.is_banned,
+                     # 格式化日期时间以便前端显示
+                     'ban_expires_at': profile.ban_expires_at.strftime('%Y-%m-%d %H:%M:%S') if profile.ban_expires_at else None,
+                     'created_at': profile.created_at.strftime('%Y-%m-%d %H:%M:%S') if profile.created_at else None,
+                 }
+
+            users_data.append({
+                'id': user.id,
+                'username': user.username,
+                'email': user.email, # 可以考虑是否返回 email
+                'is_active': user.is_active, # Django User 自带的 active 状态
+                'date_joined': user.date_joined.strftime('%Y-%m-%d %H:%M:%S'),
+                'profile': profile_data
+            })
+
+        return JsonResponse({
+            'success': True,
+            'users': users_data,
+            'pagination': {
+                'page': users_page.number,
+                'per_page': paginator.per_page,
+                'total_pages': paginator.num_pages,
+                'total_users': paginator.count,
+                'has_next': users_page.has_next(),
+                'has_previous': users_page.has_previous(),
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"获取用户列表失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JsonResponse({
+            'success': False,
+            'message': f"获取用户列表失败: {str(e)}"
+        }, status=500)
+
+
+@admin_required
+@csrf_exempt
+@require_http_methods(["POST"])
+def manage_user_ban_status(request):
+    """
+    管理用户的封禁状态 (管理员)
+    需要参数:
+    - user_id: 要操作的用户ID
+    - action: 'ban' 或 'unban'
+    - ban_duration_days: (可选, 仅在 action='ban' 时有效) 封禁天数，0 或 null 表示永久
+    """
+    try:
+        data = json.loads(request.body)
+        user_id = data.get('user_id')
+        action = data.get('action')
+        ban_duration_days = data.get('ban_duration_days') # 可以是 null 或 0
+
+        if not user_id or action not in ['ban', 'unban']:
+            return JsonResponse({'success': False, 'message': "缺少必要的参数 (user_id, action)"}, status=400)
+
+        # 防止管理员封禁自己
+        # Convert user_id from request (likely string or int) to same type as request.user.id (int)
+        try:
+            target_user_id = int(user_id)
+        except ValueError:
+             return JsonResponse({'success': False, 'message': "无效的用户ID"}, status=400)
+
+        if request.user.id == target_user_id:
+             return JsonResponse({'success': False, 'message': "不能封禁自己"}, status=400)
+
+
+        target_user = get_object_or_404(User, id=target_user_id)
+        # 获取或创建 UserProfile，以防某些用户还没有 Profile
+        profile, created = UserProfile.objects.get_or_create(user=target_user)
+
+        # 防止管理员封禁其他管理员 (可选策略)
+        if profile.is_admin:
+             return JsonResponse({'success': False, 'message': "不能封禁其他管理员"}, status=403)
+
+
+        if action == 'ban':
+            profile.is_banned = True
+            # Handle ban_duration_days being None, 0, or a positive integer string/number
+            try:
+                duration = int(ban_duration_days) if ban_duration_days is not None else 0
+            except (ValueError, TypeError):
+                 duration = 0 # Default to permanent if invalid value provided
+
+            if duration > 0:
+                profile.ban_expires_at = timezone.now() + timedelta(days=duration)
+                message = f"用户 {target_user.username} 已被临时封禁 {duration} 天。"
+            else:
+                profile.ban_expires_at = None # 永久封禁
+                message = f"用户 {target_user.username} 已被永久封禁。"
+            profile.save()
+            return JsonResponse({'success': True, 'message': message})
+
+        elif action == 'unban':
+            profile.is_banned = False
+            profile.ban_expires_at = None
+            profile.save()
+            return JsonResponse({'success': True, 'message': f"用户 {target_user.username} 已被解封。"})
+
+    except User.DoesNotExist:
+         return JsonResponse({'success': False, 'message': "用户不存在"}, status=404)
+    except ValueError: # Catch potential int conversion errors earlier
+         return JsonResponse({'success': False, 'message': "无效的参数格式"}, status=400)
+    except Exception as e:
+        logger.error(f"管理用户封禁状态失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JsonResponse({
+            'success': False,
+            'message': f"操作失败: {str(e)}"
         }, status=500)
 
 
