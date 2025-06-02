@@ -540,6 +540,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 conversation['id'], response_content, model['id']
             )
 
+            # --- MOVED & MODIFIED: Set status after successful save ---
+            final_status = "completed" # Mark as completed now that AI responded and saved
+            logger.info(f"process_ai_response: AI response received and saved (MsgID: {ai_message['id']}). Set final_status='completed'.")
+            # --- END MOVED & MODIFIED ---
+
             # --- FINAL PRE-SEND CHECK (Moved Here, No Lock Needed for Sending) ---
             stop_state_final_check = get_stop_requested_sync(self.conversation_id)
             local_stop_flag_final_check = self.stop_requested # 检查本地标志
@@ -554,23 +559,27 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     reason.append(f"全局状态停止 (匹配 GenID: {generation_id})")
                 if local_stop_flag_final_check:
                     reason.append("本地标志为True")
-                logger.warning(f"process_ai_response: FINAL PRE-SEND CHECK detected stop condition ({', '.join(reason)}) for conversation {self.conversation_id}. Deleting message {ai_message['id']} and NOT sending.")
+                # --- MODIFIED: Update status and delete message on pre-send stop ---
+                final_status = "cancelled" # Update status to reflect cancellation before send
+                logger.warning(f"process_ai_response: FINAL PRE-SEND CHECK detected stop condition ({', '.join(reason)}) for conversation {self.conversation_id}. Deleting message {ai_message['id']}, setting status to '{final_status}' and NOT sending.")
                 # 删除刚刚保存的消息
                 deleted = await self.delete_ai_message(ai_message['id'])
                 if deleted:
                     logger.info(f"已删除终止后的AI回复消息 ID: {ai_message['id']} (pre-send check)")
                 else:
                     logger.warning(f"尝试删除终止后的AI回复消息失败或未找到 ID: {ai_message['id']} (pre-send check)")
-                # 直接返回，不执行 group_send
+                # 直接返回，不执行 group_send，finally block will handle sending 'cancelled' status
                 return
+                # --- END MODIFIED ---
             # --- 结束最终发送前检查 ---
 
             # 如果检查通过，才发送消息
             logger.info(f"process_ai_response: Sending AI message {ai_message['id']} for conversation {self.conversation_id} (passed final pre-send check)")
-            await self.channel_layer.group_send( # Corrected indentation
-                self.conversation_group_name,
-                {
-                    'type': 'chat_message',
+            try: # Add try/except around group_send
+                await self.channel_layer.group_send(
+                    self.conversation_group_name,
+                    {
+                        'type': 'chat_message',
                         'message': response_content,
                         'is_user': False,
                         'message_id': ai_message['id'],
@@ -578,7 +587,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         'generation_id': generation_id
                     }
                 )
-            final_status = "completed" # Mark as completed if sending was successful
+            except Exception as group_send_err:
+                 logger.error(f"Error during group_send for message {ai_message['id']}: {group_send_err}")
+                 # Keep final_status as "completed" since generation succeeded, error is in delivery
+            # final_status = "completed" # REMOVED - Moved earlier
         except asyncio.CancelledError:
             logger.info(f"AI响应处理被取消 (Generation ID: {generation_id})")
             final_status = "cancelled" # Set status to cancelled
@@ -605,11 +617,22 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.clear_db_generation_id(self.conversation_id, generation_id)
             # --- END ADDED ---
             self.current_generation_id = None # Clear local generation ID on error
-            # 发送错误消息 (Send error, not stopped)
+
+            # --- MODIFIED: Send user-friendly error message ---
+            user_friendly_error = "与AI服务通信时发生未知错误，请稍后重试。"
+            error_str = str(e)
+            if isinstance(e, asyncio.TimeoutError) or "TimeoutError" in error_str:
+                user_friendly_error = "AI服务响应超时，请稍后再试或简化您的请求。"
+            elif "AI服务响应错误" in error_str: # Catch specific API errors
+                 user_friendly_error = "AI服务返回错误，请检查您的API密钥或稍后重试。"
+            elif "未能从AI服务响应中提取有效内容" in error_str:
+                 user_friendly_error = "AI服务返回了无法理解的响应，请稍后重试。"
+
             await self.send(text_data=json.dumps({
                 'type': 'error',
-                'message': f'处理AI回复时出错: {str(e)}'
+                'message': user_friendly_error # Send user-friendly message
             }))
+            # --- END MODIFIED ---
         finally:
             # --- ADDED: Cleanup in finally block ---
             logger.debug(f"process_ai_response finally block executing for GenID: {generation_id}, ConvID: {self.conversation_id}")

@@ -470,8 +470,99 @@ function initWebSocket() {
                     stopGenerationContainer.style.display = 'none';
                 }
             }
-            window.isGeneratingResponse = false;
+            window.isGeneratingResponse = false; // Keep this for immediate feedback on non-streaming message receipt
         }
+
+        // --- ADDED: Handle 'error' message ---
+        else if (data.type === 'error' && data.message) {
+            console.error("WebSocket received error message:", data.message);
+            // Display the user-friendly error message
+            // Assuming a function showAlert exists (defined in chat_page.js or utils.js)
+            if (typeof showAlert === 'function') {
+                showAlert(data.message, 'danger'); // Show error alert
+            } else {
+                // Fallback alert
+                alert(`发生错误: ${data.message}`);
+            }
+            // NOTE: Do not reset UI state here. Wait for generation_end.
+        }
+        // --- END ADDED ---
+
+        // --- ADDED: Handle 'generation_end' signal ---
+        else if (data.type === 'generation_end') {
+            console.log(`Received generation_end signal. Status: ${data.status}, GenID: ${data.generation_id}`);
+
+            // --- Centralized UI Reset Logic ---
+            // 1. Remove any loading indicators
+            const loadingIndicator = document.getElementById('ai-response-loading');
+            if (loadingIndicator) {
+                loadingIndicator.remove();
+                console.log("generation_end: Removed loading indicator.");
+            }
+            // Also remove specific loading indicators if they exist (assuming ID format like ai-response-loading-<gen_id>)
+            const specificLoadingIndicator = document.getElementById(`ai-response-loading-${data.generation_id}`);
+             if (specificLoadingIndicator) {
+                 specificLoadingIndicator.remove();
+                 console.log(`generation_end: Removed specific loading indicator for ${data.generation_id}.`);
+             }
+
+
+            // 2. Hide the main stop generation button and reset related flags
+            // Assuming hideStopGenerationButton handles flag resets (isGeneratingResponse, etc.)
+            if (typeof hideStopGenerationButton === 'function') {
+                hideStopGenerationButton(); // This should reset flags like isGeneratingResponse
+                console.log("generation_end: Called hideStopGenerationButton.");
+            } else {
+                // Fallback direct reset
+                const stopGenerationContainer = document.querySelector('#stop-generation-container');
+                if (stopGenerationContainer) {
+                    stopGenerationContainer.style.display = 'none';
+                }
+                window.isGeneratingResponse = false;
+                window.terminationRequestSent = false;
+                window.isTerminationInProgress = false;
+                console.log("generation_end: Manually hid stop button and reset flags.");
+            }
+            
+            // 3. Reset the termination confirmation flag
+            window.terminationConfirmSent = false;
+            terminationConfirmSent = false;
+            console.log("generation_end: Reset terminationConfirmSent flag.");
+
+            // 4. Reset any active regenerate buttons (important for failures/cancellations)
+             const allRegenBtns = document.querySelectorAll('.regenerate-btn[data-regenerating="true"]');
+             if (allRegenBtns.length > 0) {
+                 console.log(`generation_end: Resetting ${allRegenBtns.length} active regenerate buttons.`);
+                 allRegenBtns.forEach(btn => {
+                     btn.removeAttribute('data-regenerating');
+                     btn.classList.remove('btn-processing');
+                     btn.disabled = false;
+                     btn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+                 });
+             }
+            // --- End Centralized UI Reset Logic ---
+
+            // Optional: Add specific actions based on status if needed later
+            if (data.status === 'failed') {
+                console.warn(`Generation ${data.generation_id} failed.`);
+                // Potentially display a subtle failure indicator if not already shown by 'error' message
+            } else if (data.status === 'cancelled') {
+                console.info(`Generation ${data.generation_id} was cancelled.`);
+                 // Ensure termination message is displayed if not already
+                 const existingTerminationMessage = document.getElementById('ai-response-terminated');
+                 if (!existingTerminationMessage) {
+                     if (typeof displayTerminationMessage === 'function') {
+                         // Try to associate with the correct user message if possible
+                         // This might require passing user_message_id with generation_end
+                         displayTerminationMessage(); // Display generic termination message for now
+                     }
+                 }
+            } else if (data.status === 'completed') {
+                console.info(`Generation ${data.generation_id} completed successfully.`);
+            }
+        }
+        // --- END ADDED ---
+
     };
 }
 
