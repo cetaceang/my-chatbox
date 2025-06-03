@@ -464,9 +464,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     if retry_count > AI_REQUEST_MAX_RETRIES:
                         response_content = f"AI服务请求失败: {str(e)}"
 
+            logger.debug(f"process_ai_response: Exited AI request loop. stop_requested={self.stop_requested}, response_content type={type(response_content)}") # ADDED LOG
+
             # 检查是否是因为终止请求而退出循环
             if self.stop_requested:
-                logger.info("生成已被用户终止，不保存或发送AI回复")
+                logger.info("生成已被用户终止 (检查点1 - 循环后)，不保存或发送AI回复") # MODIFIED LOG
                 # 清除状态消息
                 await self.send_status_message('', clear=True)
                 # 发送终止消息给客户端
@@ -481,10 +483,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 return
 
             # 清除状态消息
+            logger.debug("process_ai_response: Attempting to clear status message.") # ADDED LOG
             await self.send_status_message('', clear=True)
+            logger.debug("process_ai_response: Status message cleared.") # ADDED LOG
 
+            logger.debug("process_ai_response: Checking if response_content is None.") # ADDED LOG
             if not response_content:
                 # 所有重试都失败
+                logger.warning("process_ai_response: response_content is None after loop, sending error.") # ADDED LOG
                 await self.send(text_data=json.dumps({
                     'type': 'error',
                     'message': '获取AI回复失败，请稍后重试'
@@ -492,17 +498,27 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 return
 
             # 检查是否是错误消息
-            if response_content.startswith("AI服务") or response_content.startswith("请求被取消") or "失败" in response_content:
+            logger.debug("process_ai_response: Checking if response_content is an error message.") # ADDED LOG
+            # Add a type check for safety before calling startswith
+            is_error_message = False
+            if isinstance(response_content, str):
+                 # REMOVED: "失败" in response_content check to avoid false positives
+                 is_error_message = response_content.startswith("AI服务") or response_content.startswith("请求被取消")
+            logger.debug(f"process_ai_response: Is error message check result (removed '失败' check): {is_error_message}") # MODIFIED LOG
+
+            if is_error_message:
                 # 发送错误消息
+                logger.warning(f"process_ai_response: Detected error message in response_content: {response_content}") # ADDED LOG
                 await self.send(text_data=json.dumps({
                     'type': 'error',
                     'message': response_content
                 }))
                 return
 
-            # 在保存AI回复前再次检查终止标志
+            # 在保存AI回复前再次检查终止标志 (检查点 2 - 本地标志)
+            logger.debug(f"process_ai_response: Checking self.stop_requested before save (Check 2). Value: {self.stop_requested}") # MODIFIED LOG
             if self.stop_requested:
-                logger.info("在保存AI回复前检测到终止标志，不保存或发送AI回复")
+                logger.info("在保存AI回复前检测到终止标志 (Check 2)，不保存或发送AI回复") # MODIFIED LOG
                 # 清除状态消息
                 await self.send_status_message('', clear=True)
                 # 发送终止消息给客户端
@@ -516,10 +532,24 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 self.stop_requested = False
                 return
 
-            # --- MODIFIED: Check global stop state PRECISELY before saving ---
-            stop_state_before_save = get_stop_requested_sync(self.conversation_id)
-            # Compare as strings for safety with UUIDs
-            if stop_state_before_save.get('requested') and str(stop_state_before_save.get('generation_id_to_stop')) == str(generation_id):
+            # --- MODIFIED: Check global stop state PRECISELY before saving --- (检查点 3 - 全局标志)
+            logger.debug(f"process_ai_response: Checking global stop state before save (Check 3) for GenID: {generation_id}") # MODIFIED LOG
+            stop_state_before_save = None # Initialize
+            try: # Wrap the sync call
+                 stop_state_before_save = get_stop_requested_sync(self.conversation_id)
+                 logger.debug(f"process_ai_response: Global stop state before save (Check 3 result): {stop_state_before_save}") # MODIFIED LOG
+            except Exception as sync_err:
+                 logger.error(f"process_ai_response: Error calling get_stop_requested_sync: {sync_err}")
+                 # Decide how to handle this - maybe treat as no stop? Or raise? For now, log and continue (stop_state_before_save remains None)
+
+            # Compare as strings for safety with UUIDs, handle None case
+            global_stop_requested = stop_state_before_save.get('requested', False) if stop_state_before_save else False
+            global_target_gen_id = str(stop_state_before_save.get('generation_id_to_stop')) if stop_state_before_save.get('generation_id_to_stop') else None
+            current_gen_id_str = str(generation_id)
+
+            logger.debug(f"process_ai_response: Comparing GlobalStopRequested({global_stop_requested}) AND GlobalTargetGenID({global_target_gen_id}) == CurrentGenID({current_gen_id_str})") # ADDED LOG
+
+            if global_stop_requested and global_target_gen_id == current_gen_id_str:
                 logger.warning(f"process_ai_response: 检测到针对此生成 ({generation_id}) 的停止请求 (保存前)，不保存AI回复。StopState: {stop_state_before_save}")
                 # 清除状态消息
                 await self.send_status_message('', clear=True)
@@ -535,64 +565,85 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 return
             # --- END MODIFIED CHECK ---
 
-            # 保存AI回复
-            ai_message = await self.save_ai_message(
-                conversation['id'], response_content, model['id']
-            )
+            logger.debug("process_ai_response: Passed all pre-save checks.") # ADDED LOG
 
-            # --- MOVED & MODIFIED: Set status after successful save ---
-            final_status = "completed" # Mark as completed now that AI responded and saved
-            logger.info(f"process_ai_response: AI response received and saved (MsgID: {ai_message['id']}). Set final_status='completed'.")
-            # --- END MOVED & MODIFIED ---
+            # 保存AI回复
+            logger.info(f"process_ai_response: Preparing to call save_ai_message for GenID: {generation_id}") # Keep this log
+            try: # Keep try/except around save_ai_message
+                ai_message = await self.save_ai_message(
+                    conversation['id'], response_content, model['id']
+                )
+                # ADDED LOG: Check if the call returned *anything* and what type
+                logger.debug(f"process_ai_response: save_ai_message call returned. Result type: {type(ai_message)}, Value: {ai_message}")
+                logger.info(f"process_ai_response: save_ai_message call successful for GenID: {generation_id}, MsgID: {ai_message['id']}") # ADDED LOG
+
+                # --- MOVED & MODIFIED: Set status after successful save ---
+                final_status = "completed" # Mark as completed now that AI responded and saved
+                logger.info(f"process_ai_response: AI response received and saved (MsgID: {ai_message['id']}). Set final_status='completed'.")
+                # --- END MOVED & MODIFIED ---
+
+            except Exception as save_err: # ADDED specific exception handling for save
+                logger.error(f"process_ai_response: Error occurred DURING save_ai_message call for GenID: {generation_id}: {str(save_err)}")
+                import traceback
+                logger.error(traceback.format_exc())
+                final_status = "failed" # Set status if save fails
+                # Optionally re-raise or handle differently, but for now just log and set status
+                # Re-raising would hit the outer except block below. Let's keep it contained for now.
+                # We will skip sending the message if save fails.
 
             # --- FINAL PRE-SEND CHECK (Moved Here, No Lock Needed for Sending) ---
-            stop_state_final_check = get_stop_requested_sync(self.conversation_id)
-            local_stop_flag_final_check = self.stop_requested # 检查本地标志
-            global_stop_matches_this_gen_final_check = (
-                stop_state_final_check.get('requested') and
-                str(stop_state_final_check.get('generation_id_to_stop')) == str(generation_id)
-            )
-
-            if global_stop_matches_this_gen_final_check or local_stop_flag_final_check:
-                reason = []
-                if global_stop_matches_this_gen_final_check:
-                    reason.append(f"全局状态停止 (匹配 GenID: {generation_id})")
-                if local_stop_flag_final_check:
-                    reason.append("本地标志为True")
-                # --- MODIFIED: Update status and delete message on pre-send stop ---
-                final_status = "cancelled" # Update status to reflect cancellation before send
-                logger.warning(f"process_ai_response: FINAL PRE-SEND CHECK detected stop condition ({', '.join(reason)}) for conversation {self.conversation_id}. Deleting message {ai_message['id']}, setting status to '{final_status}' and NOT sending.")
-                # 删除刚刚保存的消息
-                deleted = await self.delete_ai_message(ai_message['id'])
-                if deleted:
-                    logger.info(f"已删除终止后的AI回复消息 ID: {ai_message['id']} (pre-send check)")
-                else:
-                    logger.warning(f"尝试删除终止后的AI回复消息失败或未找到 ID: {ai_message['id']} (pre-send check)")
-                # 直接返回，不执行 group_send，finally block will handle sending 'cancelled' status
-                return
-                # --- END MODIFIED ---
-            # --- 结束最终发送前检查 ---
-
-            # 如果检查通过，才发送消息
-            logger.info(f"process_ai_response: Sending AI message {ai_message['id']} for conversation {self.conversation_id} (passed final pre-send check)")
-            try: # Add try/except around group_send
-                await self.channel_layer.group_send(
-                    self.conversation_group_name,
-                    {
-                        'type': 'chat_message',
-                        'message': response_content,
-                        'is_user': False,
-                        'message_id': ai_message['id'],
-                        'timestamp': ai_message['timestamp'].isoformat(), # Use ISO format
-                        'generation_id': generation_id
-                    }
+            # Only proceed if save was successful (final_status is 'completed')
+            if final_status == "completed":
+                stop_state_final_check = get_stop_requested_sync(self.conversation_id)
+                local_stop_flag_final_check = self.stop_requested # 检查本地标志
+                global_stop_matches_this_gen_final_check = (
+                    stop_state_final_check.get('requested') and
+                    str(stop_state_final_check.get('generation_id_to_stop')) == str(generation_id)
                 )
-            except Exception as group_send_err:
-                 logger.error(f"Error during group_send for message {ai_message['id']}: {group_send_err}")
-                 # Keep final_status as "completed" since generation succeeded, error is in delivery
-            # final_status = "completed" # REMOVED - Moved earlier
+                # Removed duplicated block
+
+                # Final check before sending the saved message
+                if global_stop_matches_this_gen_final_check or local_stop_flag_final_check:
+                    # Stop condition detected *after* saving but *before* sending
+                    reason = []
+                    if global_stop_matches_this_gen_final_check:
+                        reason.append(f"全局状态停止 (匹配 GenID: {generation_id})")
+                    if local_stop_flag_final_check:
+                        reason.append("本地标志为True")
+
+                    final_status = "cancelled" # Update status
+                    logger.warning(f"process_ai_response: FINAL PRE-SEND CHECK detected stop condition ({', '.join(reason)}) for conversation {self.conversation_id}. Deleting message {ai_message['id']}, setting status to '{final_status}' and NOT sending.")
+
+                    # Delete the message that was just saved
+                    deleted = await self.delete_ai_message(ai_message['id'])
+                    if deleted:
+                        logger.info(f"已删除终止后的AI回复消息 ID: {ai_message['id']} (pre-send check)")
+                    else:
+                        logger.warning(f"尝试删除终止后的AI回复消息失败或未找到 ID: {ai_message['id']} (pre-send check)")
+                    return # Exit, finally block will send 'cancelled' status
+                else:
+                    # Stop condition NOT detected, proceed to send the message
+                    logger.info(f"process_ai_response: Sending AI message {ai_message['id']} for conversation {self.conversation_id} (passed final pre-send check)")
+                    try:
+                        await self.channel_layer.group_send(
+                            self.conversation_group_name,
+                        {
+                            'type': 'chat_message',
+                            'message': response_content,
+                            'is_user': False,
+                            'message_id': ai_message['id'],
+                            'timestamp': ai_message['timestamp'].isoformat(), # Use ISO format
+                            'generation_id': generation_id
+                        }
+                    )
+                    # Correctly indent the except block to match the try block inside the else
+                    except Exception as group_send_err:
+                        logger.error(f"Error during group_send for message {ai_message['id']}: {group_send_err}")
+                        # Keep final_status as "completed" since generation succeeded, error is in delivery
+            # --- End of the `if final_status == "completed":` block ---
+        # Outer exception handlers for the main process_ai_response try block
         except asyncio.CancelledError:
-            logger.info(f"AI响应处理被取消 (Generation ID: {generation_id})")
+            logger.info(f"process_ai_response: Caught asyncio.CancelledError for GenID: {generation_id}") # ADDED LOG
             final_status = "cancelled" # Set status to cancelled
             # --- MODIFIED: Reset state logic in CancelledError handler ---
             # No longer reset global state here, finally block handles it.
@@ -611,7 +662,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
                  self.termination_message_sent = True # Mark as sent
 
         except Exception as e:
-            logger.error(f"处理AI回复时出错: {str(e)}") # Log error before clearing ID
+            logger.error(f"process_ai_response: Caught OUTER Exception for GenID: {generation_id}: {str(e)}") # ADDED LOG + Context
+            import traceback # Ensure traceback is imported here too
+            logger.error(traceback.format_exc()) # Log traceback for outer exception
             final_status = "failed" # Set status to failed
             # --- ADDED: Clear DB generation ID on general exception ---
             await self.clear_db_generation_id(self.conversation_id, generation_id)
@@ -775,10 +828,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def save_ai_message(self, conversation_id, content, model_id):
         """保存AI回复消息"""
+        logger.debug(f"save_ai_message: Attempting to save AI message for conversation {conversation_id}") # ADDED LOG
         try:
+            logger.debug(f"save_ai_message: Getting conversation {conversation_id}") # ADDED LOG
             conversation = Conversation.objects.get(id=conversation_id)
+            logger.debug(f"save_ai_message: Getting model {model_id}") # ADDED LOG
             model = AIModel.objects.get(id=model_id)
 
+            logger.debug(f"save_ai_message: Creating Message object for conversation {conversation_id}") # ADDED LOG
             ai_message = Message.objects.create(
                 conversation=conversation,
                 content=content,
@@ -787,7 +844,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
             )
 
             # 更新会话时间
+            logger.debug(f"save_ai_message: Message created with ID {ai_message.id}. Updating conversation timestamp.") # ADDED LOG
             conversation.save()  # 自动更新updated_at字段
+            logger.debug(f"save_ai_message: Conversation timestamp updated for {conversation_id}") # ADDED LOG
 
             return {
                 'id': ai_message.id,
@@ -795,8 +854,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 'timestamp': ai_message.timestamp
             }
         except Exception as e:
-            logger.error(f"保存AI回复失败: {str(e)}")
-            raise
+            logger.error(f"save_ai_message: Error saving AI message for conversation {conversation_id}: {str(e)}") # ADDED LOG Context
+            import traceback # Ensure traceback is imported here
+            logger.error(traceback.format_exc()) # Log full traceback
+            raise # Re-raise the exception
 
     @database_sync_to_async
     def delete_ai_message(self, message_id):
