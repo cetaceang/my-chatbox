@@ -2,6 +2,20 @@
 /* globals handleImageUpload, deleteMessage, editConversationTitle, deleteConversation, regenerateResponse, getCookie, escapeHtml, rebuildMessageElement, completeMessageEdit, saveMessageToServer, sendStopGenerationRequest, displayTerminationMessage, handleGenerationRequest */
 
 function initializeEventListeners() {
+    const newConversationBtn = document.querySelector('#new-conversation-btn');
+    if (newConversationBtn) {
+        newConversationBtn.addEventListener('click', function(e) {
+            e.preventDefault(); // 阻止链接的默认跳转行为
+            
+            // 清除本地存储的会话ID
+            localStorage.removeItem('selectedConversationId'); 
+            
+            // 跳转到主页面以开始新对话
+            // 这将导致页面刷新，并由 chat_page.js 处理新会话的逻辑
+            window.location.href = this.getAttribute('href');
+        });
+    }
+
     const messageInput = document.querySelector('#message-input');
     const sendButton = document.querySelector('#send-button');
     const uploadFileBtn = document.querySelector('#upload-file-btn');
