@@ -124,7 +124,7 @@ def main():
     # 启动服务器
     print("启动服务器...")
     host = "0.0.0.0"
-    port = 3000
+    port = 3001
     print(f"服务器将在 http://{host}:{port} 上运行")
     print("按Ctrl+C停止服务器")
     

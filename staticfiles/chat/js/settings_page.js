@@ -315,6 +315,39 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         }
 
+        // 添加服务提供商开关事件监听器
+        if (providerList) {
+            providerList.addEventListener('change', (e) => {
+                if (e.target.classList.contains('provider-active-toggle')) {
+                    const providerItem = e.target.closest('.list-group-item');
+                    const providerId = providerItem.dataset.providerId;
+                    const isActive = e.target.checked;
+                    const providerName = providerItem.querySelector('h6').textContent;
+                    
+                    // 发送请求更新服务提供商状态
+                    fetch('/chat/api/providers/', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+                        body: JSON.stringify({ id: providerId, is_active: isActive })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (!data.success) {
+                            // 如果失败，恢复开关状态
+                            e.target.checked = !isActive;
+                            alert(`更新失败: ${data.message}`);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('更新服务提供商状态出错:', error);
+                        // 如果失败，恢复开关状态
+                        e.target.checked = !isActive;
+                        alert('更新失败，请稍后再试');
+                    });
+                }
+            });
+        }
+
         if (providerList) {
             providerList.addEventListener('click', (e) => {
                 const editBtn = e.target.closest('.edit-provider-btn');
@@ -364,6 +397,213 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         }
 
+
+        // --- Fetch Models from API ---
+        const fetchModelsBtn = document.getElementById('fetch-models-btn');
+        const fetchModelsModalElement = document.getElementById('fetchModelsModal');
+        const fetchModelsModal = fetchModelsModalElement ? new bootstrap.Modal(fetchModelsModalElement) : null;
+        const fetchProviderSelect = document.getElementById('fetch-provider-select');
+        const fetchModelsLoading = document.getElementById('fetch-models-loading');
+        const fetchModelsError = document.getElementById('fetch-models-error');
+        const fetchModelsErrorMessage = document.getElementById('fetch-models-error-message');
+        const fetchModelsTableContainer = document.getElementById('fetch-models-table-container');
+        const fetchModelsTableBody = document.getElementById('fetch-models-table-body');
+        const selectAllCheckbox = document.getElementById('select-all-checkbox');
+        const selectAllModelsBtn = document.getElementById('select-all-models-btn');
+        const deselectAllModelsBtn = document.getElementById('deselect-all-models-btn');
+        const fetchModelsBtn2 = document.getElementById('fetch-models-submit-btn'); // 模态框中的获取按钮
+        const addSelectedModelsBtn = document.getElementById('add-selected-models-btn');
+        
+        // 打开获取模型模态框
+        if (fetchModelsBtn && fetchModelsModal) {
+            fetchModelsBtn.addEventListener('click', () => {
+                // 重置模态框状态
+                if (fetchProviderSelect) fetchProviderSelect.value = '';
+                if (fetchModelsLoading) fetchModelsLoading.classList.add('d-none');
+                if (fetchModelsError) fetchModelsError.classList.add('d-none');
+                if (fetchModelsTableContainer) fetchModelsTableContainer.classList.add('d-none');
+                if (fetchModelsBtn2) fetchModelsBtn2.classList.remove('d-none');
+                if (addSelectedModelsBtn) addSelectedModelsBtn.classList.add('d-none');
+                
+                fetchModelsModal.show();
+            });
+        }
+        
+        // 获取模型列表
+        if (fetchModelsBtn2) {
+            fetchModelsBtn2.addEventListener('click', () => {
+                const providerId = fetchProviderSelect ? fetchProviderSelect.value : '';
+                
+                if (!providerId) {
+                    alert('请选择服务提供商');
+                    return;
+                }
+                
+                // 显示加载状态
+                if (fetchModelsLoading) fetchModelsLoading.classList.remove('d-none');
+                if (fetchModelsError) fetchModelsError.classList.add('d-none');
+                if (fetchModelsTableContainer) fetchModelsTableContainer.classList.add('d-none');
+                if (fetchModelsBtn2) fetchModelsBtn2.classList.add('d-none');
+                if (addSelectedModelsBtn) addSelectedModelsBtn.classList.add('d-none');
+                
+                // 发送请求获取模型列表
+                fetch(`/chat/api/fetch-models/${providerId}/`, {
+                    method: 'GET',
+                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    // 隐藏加载状态
+                    if (fetchModelsLoading) fetchModelsLoading.classList.add('d-none');
+                    
+                    if (data.success && data.models && Array.isArray(data.models)) {
+                        // 显示模型列表
+                        if (fetchModelsTableContainer) fetchModelsTableContainer.classList.remove('d-none');
+                        if (addSelectedModelsBtn) addSelectedModelsBtn.classList.remove('d-none');
+                        
+                        // 清空表格
+                        if (fetchModelsTableBody) fetchModelsTableBody.innerHTML = '';
+                        
+                        // 填充表格
+                        data.models.forEach(model => {
+                            const isExisting = model.is_existing;
+                            const row = `
+                                <tr data-model-name="${model.model_name}">
+                                    <td>
+                                        <input type="checkbox" class="model-select-checkbox" ${isExisting ? 'disabled' : ''}>
+                                    </td>
+                                    <td>${model.model_name}</td>
+                                    <td>
+                                        <input type="text" class="form-control model-display-name" value="${model.display_name}" ${isExisting ? 'disabled' : ''}>
+                                    </td>
+                                    <td>
+                                        <input type="number" class="form-control model-max-context" value="${model.max_context || 4096}" ${isExisting ? 'disabled' : ''}>
+                                    </td>
+                                    <td>
+                                        <input type="number" class="form-control model-max-history" value="10" ${isExisting ? 'disabled' : ''}>
+                                    </td>
+                                    <td>
+                                        ${isExisting ? '<span class="badge bg-secondary">已存在</span>' : '<span class="badge bg-success">可添加</span>'}
+                                    </td>
+                                </tr>
+                            `;
+                            if (fetchModelsTableBody) fetchModelsTableBody.insertAdjacentHTML('beforeend', row);
+                        });
+                        
+                        // 如果没有模型
+                        if (data.models.length === 0) {
+                            if (fetchModelsTableBody) fetchModelsTableBody.innerHTML = `
+                                <tr>
+                                    <td colspan="6" class="text-center text-muted">未找到可用模型</td>
+                                </tr>
+                            `;
+                            if (addSelectedModelsBtn) addSelectedModelsBtn.classList.add('d-none');
+                        }
+                    } else {
+                        // 显示错误信息
+                        if (fetchModelsError) fetchModelsError.classList.remove('d-none');
+                        if (fetchModelsErrorMessage) fetchModelsErrorMessage.textContent = data.message || '获取模型列表失败';
+                        if (fetchModelsBtn2) fetchModelsBtn2.classList.remove('d-none');
+                    }
+                })
+                .catch(error => {
+                    console.error('获取模型列表出错:', error);
+                    
+                    // 隐藏加载状态，显示错误信息
+                    if (fetchModelsLoading) fetchModelsLoading.classList.add('d-none');
+                    if (fetchModelsError) fetchModelsError.classList.remove('d-none');
+                    if (fetchModelsErrorMessage) fetchModelsErrorMessage.textContent = `获取模型列表失败: ${error.message}`;
+                    if (fetchModelsBtn2) fetchModelsBtn2.classList.remove('d-none');
+                });
+            });
+        }
+        
+        // 全选/取消全选
+        if (selectAllCheckbox) {
+            selectAllCheckbox.addEventListener('change', () => {
+                const checkboxes = document.querySelectorAll('.model-select-checkbox:not([disabled])');
+                checkboxes.forEach(checkbox => {
+                    checkbox.checked = selectAllCheckbox.checked;
+                });
+            });
+        }
+        
+        if (selectAllModelsBtn) {
+            selectAllModelsBtn.addEventListener('click', () => {
+                const checkboxes = document.querySelectorAll('.model-select-checkbox:not([disabled])');
+                checkboxes.forEach(checkbox => {
+                    checkbox.checked = true;
+                });
+                if (selectAllCheckbox) selectAllCheckbox.checked = true;
+            });
+        }
+        
+        if (deselectAllModelsBtn) {
+            deselectAllModelsBtn.addEventListener('click', () => {
+                const checkboxes = document.querySelectorAll('.model-select-checkbox:not([disabled])');
+                checkboxes.forEach(checkbox => {
+                    checkbox.checked = false;
+                });
+                if (selectAllCheckbox) selectAllCheckbox.checked = false;
+            });
+        }
+        
+        // 批量添加所选模型
+        if (addSelectedModelsBtn) {
+            addSelectedModelsBtn.addEventListener('click', () => {
+                const selectedModels = [];
+                const rows = fetchModelsTableBody ? fetchModelsTableBody.querySelectorAll('tr') : [];
+                
+                rows.forEach(row => {
+                    const checkbox = row.querySelector('.model-select-checkbox');
+                    if (checkbox && checkbox.checked && !checkbox.disabled) {
+                        const modelName = row.dataset.modelName;
+                        const displayName = row.querySelector('.model-display-name').value;
+                        const maxContext = parseInt(row.querySelector('.model-max-context').value) || 4096;
+                        const maxHistory = parseInt(row.querySelector('.model-max-history').value) || 10;
+                        
+                        selectedModels.push({
+                            model_name: modelName,
+                            display_name: displayName,
+                            max_context: maxContext,
+                            max_history_messages: maxHistory,
+                            is_active: true
+                        });
+                    }
+                });
+                
+                if (selectedModels.length === 0) {
+                    alert('请选择至少一个模型');
+                    return;
+                }
+                
+                const providerId = fetchProviderSelect ? fetchProviderSelect.value : '';
+                
+                // 发送请求批量添加模型
+                fetch('/chat/api/batch-add-models/', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+                    body: JSON.stringify({
+                        provider_id: providerId,
+                        models: selectedModels
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert(data.message);
+                        if (fetchModelsModal) fetchModelsModal.hide();
+                        window.location.reload(); // 刷新页面显示新添加的模型
+                    } else {
+                        alert(`操作失败: ${data.message}`);
+                    }
+                })
+                .catch(error => {
+                    console.error('批量添加模型出错:', error);
+                    alert(`操作失败: ${error.message}`);
+                });
+            });
+        }
 
         // --- Model Management ---
         const addModelBtn = document.getElementById('add-model-btn');
@@ -431,6 +671,39 @@ document.addEventListener('DOMContentLoaded', () => {
                     console.error('操作出错:', error);
                     alert('操作失败，请稍后再试');
                 });
+            });
+        }
+
+        // 添加AI模型开关事件监听器
+        if (modelList) {
+            modelList.addEventListener('change', (e) => {
+                if (e.target.classList.contains('model-active-toggle')) {
+                    const modelItem = e.target.closest('.list-group-item');
+                    const modelId = modelItem.dataset.modelId;
+                    const isActive = e.target.checked;
+                    const modelName = modelItem.querySelector('h6').textContent;
+                    
+                    // 发送请求更新AI模型状态
+                    fetch('/chat/api/models/', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+                        body: JSON.stringify({ id: modelId, is_active: isActive })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (!data.success) {
+                            // 如果失败，恢复开关状态
+                            e.target.checked = !isActive;
+                            alert(`更新失败: ${data.message}`);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('更新AI模型状态出错:', error);
+                        // 如果失败，恢复开关状态
+                        e.target.checked = !isActive;
+                        alert('更新失败，请稍后再试');
+                    });
+                }
             });
         }
 

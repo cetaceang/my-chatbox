@@ -1,0 +1,33 @@
+# Git
+.git
+.gitignore
+
+# Docker
+.dockerignore
+Dockerfile
+docker-compose.yml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# Environment files
+.env
+.env.*
+
+# Database file
+db.sqlite3
+
+# Static files collected by Django
+staticfiles/
+
+# Media files
+media/

@@ -1,0 +1,467 @@
+import json
+import logging
+import uuid
+import time
+import asyncio
+import aiohttp
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+from django.shortcuts import get_object_or_404
+
+from .models import AIModel, Conversation, Message
+from .state_utils import get_stop_requested_sync, set_stop_requested_sync
+from .utils import ensure_valid_api_url
+
+logger = logging.getLogger(__name__)
+
+AI_REQUEST_TIMEOUT = 300  # 使用整数，而不是对象
+
+async def generate_ai_response(conversation_id, model_id, user_message_id=None, is_regenerate=False, generation_id=None, temp_id=None, is_streaming=True):
+    """
+    核心服务函数，用于生成AI回复。
+    - 支持流式和非流式两种模式。
+    - 处理新消息和重新生成两种情况。
+    - 通过channel_layer将结果推送回WebSocket。
+    """
+    conversation = None
+    final_status = "unknown"
+    
+    try:
+        uuid.UUID(generation_id)
+        real_generation_id = generation_id
+    except (ValueError, TypeError):
+        real_generation_id = str(uuid.uuid4())
+
+    try:
+        # 1. 获取会话和模型
+        conversation = await get_conversation_async(conversation_id)
+        model = await get_model_async(model_id)
+        if not conversation or not model:
+            logger.error(f"无法找到会话 {conversation_id} 或模型 {model_id}")
+            return
+
+        # 2. 准备并发送 generation_start 事件
+        await set_db_generation_id(conversation_id, real_generation_id)
+        # set_stop_requested_sync(conversation_id, False) # BUG: This prematurely clears stop signals for other running tasks.
+        logger.info(f"Service: Starting generation with ID {real_generation_id} for conversation {conversation_id}")
+
+        await send_generation_event(conversation_id, 'generation_start', {
+            'generation_id': real_generation_id,
+            'temp_id': temp_id
+        })
+
+        # 3. 准备历史消息
+        messages_for_api = await prepare_history_messages(conversation, model, user_message_id, is_regenerate)
+
+        # 4. 构建并发送AI请求
+        request_data = {
+            "model": model['model_name'],
+            "messages": messages_for_api,
+            "stream": is_streaming,  # 使用传入的标志
+            **model['default_params']
+        }
+        api_url = ensure_valid_api_url(model['provider_base_url'], "/v1/chat/completions")
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {model['provider_api_key']}"}
+
+        full_content = ""
+        
+        # 增加块间超时设置
+        INTER_CHUNK_TIMEOUT = 20  # 如果20秒内没有收到任何数据（包括空包），则超时
+        
+        timeout = aiohttp.ClientTimeout(total=AI_REQUEST_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            # 在请求前检查停止信号
+            stop_state = get_stop_requested_sync(conversation_id)
+            if stop_state.get('requested') and str(stop_state.get('generation_id_to_stop')) == real_generation_id:
+                logger.warning(f"Service: Stop request detected for GenID {real_generation_id} before making request. Aborting.")
+                final_status = "cancelled"
+            else:
+                async with session.post(api_url, json=request_data, headers=headers) as response:
+                    if response.status == 200:
+                        if is_streaming:
+                            # 最终修复：根据用户提供的服务器端伪流式代码，实现一个健壮的客户端。
+                            # 服务器行为：
+                            # 1. 发送多个空的 "heartbeat" 数据块。
+                            # 2. 发送一个包含完整最终内容的单个数据块。
+                            # 3. 关闭连接（不发送 [DONE]）。
+                            buffer = b''
+                            while True:
+                                try:
+                                    # 使用块间超时来防止无限期挂起
+                                    async with asyncio.timeout(INTER_CHUNK_TIMEOUT):
+                                        chunk = await response.content.read(4096)
+                                    
+                                    if not chunk:
+                                        # 服务器关闭了连接，这是预期的流结束方式
+                                        break
+
+                                    buffer += chunk
+                                    
+                                    # SSE 消息以 \n\n 分隔
+                                    messages = buffer.split(b'\n\n')
+                                    buffer = messages.pop()  # 保留最后一个不完整的消息
+
+                                    for msg in messages:
+                                        if not msg:
+                                            continue
+                                        
+                                        # 检查停止信号
+                                        stop_state = get_stop_requested_sync(conversation_id)
+                                        if stop_state.get('requested') and str(stop_state.get('generation_id_to_stop')) == real_generation_id:
+                                            logger.warning(f"Service: Stop request detected for GenID {real_generation_id}. Stopping stream.")
+                                            final_status = "cancelled"
+                                            break
+
+                                        # 解析单个消息 (可能有多行)
+                                        for line in msg.split(b'\n'):
+                                            line_str = line.decode('utf-8').strip()
+                                            if line_str.startswith('data: '):
+                                                chunk_data = line_str[6:]
+                                                if chunk_data == '[DONE]': # 以防万一，还是处理一下
+                                                    continue
+                                                try:
+                                                    chunk_json = json.loads(chunk_data)
+                                                    content_piece = extract_content_from_chunk(chunk_json)
+                                                    if content_piece:
+                                                        full_content += content_piece
+                                                        await send_generation_event(conversation_id, 'stream_update', {
+                                                            'generation_id': real_generation_id,
+                                                            'content': content_piece,
+                                                            'temp_id': temp_id
+                                                        })
+                                                except json.JSONDecodeError:
+                                                    logger.error(f"JSON decode error for chunk: {chunk_data}")
+                                        
+                                    if final_status == "cancelled":
+                                        break
+
+                                except asyncio.TimeoutError:
+                                    logger.error(f"AI response chunk timeout after {INTER_CHUNK_TIMEOUT}s for conversation {conversation_id}")
+                                    final_status = "failed"
+                                    error_detail = f"响应超时：在 {INTER_CHUNK_TIMEOUT} 秒内未收到任何数据"
+                                    break
+                            
+                            if final_status not in ["cancelled", "failed"]:
+                                final_status = "completed" if full_content else "failed"
+
+                        else:
+                            # 5b. 处理非流式响应 (异步)
+                            response_json = await response.json()
+                            full_content = extract_content_from_chunk(response_json)
+                            if full_content:
+                                final_status = "completed"
+                                await send_generation_event(conversation_id, 'full_message', {
+                                    'generation_id': real_generation_id,
+                                    'content': full_content,
+                                    'temp_id': temp_id
+                                })
+                            else:
+                                logger.error("Non-streaming AI response completed but no content was extracted.")
+                                final_status = "failed"
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"AI API request failed with status {response.status}: {error_text}")
+                        final_status = "failed"
+                        error_detail = error_text
+
+        # 6. 如果成功，保存AI消息
+        if final_status == "completed":
+            stop_state = get_stop_requested_sync(conversation_id)
+            if stop_state.get('requested') and str(stop_state.get('generation_id_to_stop')) == real_generation_id:
+                logger.warning(f"Service: Stop request detected for GenID {real_generation_id} just before saving. Discarding response.")
+                final_status = "cancelled"
+            else:
+                if is_regenerate:
+                    await delete_subsequent_ai_messages(conversation_id, user_message_id)
+                
+                ai_message = await save_ai_message(conversation_id, full_content, model['id'])
+                await send_generation_event(conversation_id, 'id_update', {
+                    'generation_id': real_generation_id,
+                    'temp_id': temp_id,
+                    'message_id': ai_message['id']
+                })
+
+    except asyncio.CancelledError:
+        logger.warning(f"Service: Generation task for GenID {real_generation_id} was cancelled externally.")
+        final_status = "stopped"
+
+    except aiohttp.ClientError as e:
+        logger.error(f"Network error in generate_ai_response for conversation {conversation_id}: {e}", exc_info=True)
+        final_status = "failed"
+        error_detail = f"网络错误: {e}"
+
+    except Exception as e:
+        logger.error(f"Error in generate_ai_response for conversation {conversation_id}: {e}", exc_info=True)
+        final_status = "failed"
+        error_detail = f"内部服务器错误: {e}"
+
+    finally:
+        # 7. 清理并发送结束信号
+        if conversation and real_generation_id:
+            await clear_db_generation_id(conversation_id, real_generation_id)
+            
+            stop_state = get_stop_requested_sync(conversation_id)
+            if str(stop_state.get('generation_id_to_stop')) == real_generation_id:
+                set_stop_requested_sync(conversation_id, False)
+                logger.info(f"Service: Reset global stop state for conversation {conversation_id} as targeted generation {real_generation_id} ended.")
+
+            event_data = {
+                'generation_id': real_generation_id,
+                'status': final_status
+            }
+            if final_status == "failed" and 'error_detail' in locals():
+                event_data['error'] = error_detail
+
+            await send_generation_event(conversation_id, 'generation_end', event_data)
+        logger.info(f"Service: Generation {real_generation_id} for conversation {conversation_id} finished with status: {final_status}")
+
+
+# --- 辅助数据库异步函数 ---
+from channels.db import database_sync_to_async
+
+@database_sync_to_async
+def get_conversation_async(conversation_id):
+    try:
+        conv = Conversation.objects.get(id=conversation_id)
+        return {
+            'id': conv.id,
+            'system_prompt': conv.system_prompt
+        }
+    except Conversation.DoesNotExist:
+        return None
+
+@database_sync_to_async
+def get_model_async(model_id):
+    try:
+        model = AIModel.objects.select_related('provider').get(id=model_id)
+        return {
+            'id': model.id,
+            'model_name': model.model_name,
+            'max_history_messages': model.max_history_messages,
+            'default_params': model.default_params,
+            'provider_base_url': model.provider.base_url,
+            'provider_api_key': model.provider.api_key
+        }
+    except AIModel.DoesNotExist:
+        return None
+
+import re
+import base64
+import mimetypes
+import os
+from django.core.files.storage import default_storage
+
+@database_sync_to_async
+def prepare_history_messages(conversation, model, user_message_id, is_regenerate):
+    """准备用于API请求的消息历史记录，支持多模态内容。"""
+    if is_regenerate:
+        user_message = Message.objects.get(id=user_message_id)
+        history_qs = Message.objects.filter(
+            conversation_id=conversation['id'],
+            timestamp__lte=user_message.timestamp
+        ).order_by('timestamp')
+    else:
+        history_qs = Message.objects.filter(conversation_id=conversation['id']).order_by('timestamp')
+
+    if history_qs.count() > model['max_history_messages']:
+        history_qs = history_qs[history_qs.count() - model['max_history_messages']:]
+
+    messages = []
+    if conversation.get('system_prompt'):
+        messages.append({"role": "system", "content": conversation['system_prompt']})
+    
+    from .image_config import IMAGE_CONTEXT_STRATEGY, MAX_IMAGES_IN_CONTEXT
+    
+    # --- 健壮的 "一次成型" 方案 ---
+    
+    # 1. 识别所有候选图片消息
+    all_image_message_ids = [
+        msg.id for msg in history_qs 
+        if msg.is_user and re.search(r'\[file:(.*?)\]', msg.content)
+    ]
+    
+    # 2. 根据策略确定哪些图片需要被完整包含
+    latest_image_ids_to_include = set()
+    if IMAGE_CONTEXT_STRATEGY == "all":
+        latest_image_ids_to_include = set(all_image_message_ids)
+    elif IMAGE_CONTEXT_STRATEGY == "latest_only":
+        latest_image_ids_to_include = set(all_image_message_ids[-MAX_IMAGES_IN_CONTEXT:])
+    
+    # 3. 一次性构建最终消息列表
+    for msg in history_qs:
+        role = "user" if msg.is_user else "assistant"
+        
+        if msg.id in latest_image_ids_to_include:
+            # --- 处理需要包含完整图片数据的消息 ---
+            file_match = re.search(r'\[file:(.*?)\]', msg.content)
+            file_path = file_match.group(1)
+            text_content = msg.content.replace(file_match.group(0), '').strip()
+            
+            try:
+                if default_storage.exists(file_path):
+                    with default_storage.open(file_path, 'rb') as f:
+                        file_data = f.read()
+                    
+                    base64_content = base64.b64encode(file_data).decode('utf-8')
+                    mime_type, _ = mimetypes.guess_type(file_path)
+                    if not mime_type:
+                        mime_type = 'application/octet-stream'
+                    
+                    multi_modal_content = [
+                        {"type": "text", "text": text_content},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_content}"}}
+                    ]
+                    messages.append({"role": role, "content": multi_modal_content})
+                    logger.info(f"已将图片消息 {msg.id} 的完整内容添加到上下文中。")
+                else:
+                    logger.warning(f"文件 '{file_path}' 在消息 {msg.id} 中被引用但未找到。")
+                    final_content = f"{text_content}\n[图片上传失败: 文件不存在]"
+                    messages.append({"role": role, "content": final_content})
+            except Exception as e:
+                logger.error(f"处理消息 {msg.id} 中的文件 '{file_path}' 时出错: {e}", exc_info=True)
+                final_content = f"{text_content}\n[图片处理失败]"
+                messages.append({"role": role, "content": final_content})
+        
+        elif msg.is_user and re.search(r'\[file:(.*?)\]', msg.content):
+            # --- 处理较旧的、不需要包含完整图片数据的图片消息 ---
+            file_match = re.search(r'\[file:(.*?)\]', msg.content)
+            file_path = file_match.group(1)
+            text_content = msg.content.replace(file_match.group(0), '').strip()
+            
+            image_description = f"[用户上传了图片: {os.path.basename(file_path)}]"
+            final_content = f"{text_content}\n{image_description}" if text_content else image_description
+            messages.append({"role": role, "content": final_content})
+            logger.info(f"已将旧图片消息 {msg.id} 的文本描述添加到上下文中。")
+            
+        else:
+            # --- 处理普通文本消息 ---
+            messages.append({"role": role, "content": msg.content})
+            
+    logger.info(f"准备了 {len(messages)} 条消息用于API请求，图片策略: {IMAGE_CONTEXT_STRATEGY}")
+    return messages
+
+@database_sync_to_async
+def save_ai_message(conversation_id, content, model_id):
+    conversation = Conversation.objects.get(id=conversation_id)
+    model = AIModel.objects.get(id=model_id)
+    ai_message = Message.objects.create(
+        conversation=conversation,
+        content=content,
+        is_user=False,
+        model_used=model
+    )
+    conversation.save()
+    return {'id': ai_message.id}
+
+@database_sync_to_async
+def delete_subsequent_ai_messages(conversation_id, user_message_id):
+    """删除指定用户消息之后的所有AI消息"""
+    try:
+        user_message = Message.objects.get(id=user_message_id)
+        Message.objects.filter(
+            conversation_id=conversation_id,
+            is_user=False,
+            timestamp__gt=user_message.timestamp
+        ).delete()
+    except Message.DoesNotExist:
+        logger.error(f"Cannot find user message {user_message_id} to delete subsequent messages.")
+
+@database_sync_to_async
+def set_db_generation_id(conversation_id, generation_id):
+    Conversation.objects.filter(id=conversation_id).update(current_generation_id=generation_id)
+
+@database_sync_to_async
+def clear_db_generation_id(conversation_id, generation_id_to_clear):
+    conv = Conversation.objects.filter(id=conversation_id).first()
+    if conv and str(conv.current_generation_id) == str(generation_id_to_clear):
+        conv.current_generation_id = None
+        conv.save(update_fields=['current_generation_id'])
+
+# --- 辅助 Channel Layer 函数 ---
+async def send_generation_event(conversation_id, event_type, data):
+    """向客户端发送生成事件"""
+    channel_layer = get_channel_layer()
+    group_name = f'chat_{conversation_id}'
+    
+    message_to_send = {
+        'type': 'broadcast_event',
+        'event': {
+            'type': event_type,
+            'data': data
+        }
+    }
+    
+    await channel_layer.group_send(group_name, message_to_send)
+
+# --- 辅助内容提取函数 ---
+def extract_content_from_chunk(chunk_json):
+    """从流式或非流式数据块中提取内容"""
+    if 'choices' in chunk_json and len(chunk_json['choices']) > 0:
+        choice = chunk_json['choices'][0]
+        if 'delta' in choice: # 流式
+            return choice['delta'].get('content')
+        if 'message' in choice: # 非流式
+            return choice['message'].get('content')
+    return None
+
+async def generate_ai_response_with_image(conversation_id, model_id, user_message_id, generation_id, temp_id, message, file_data, file_name, file_type, is_streaming=True):
+    """
+    处理图片上传的AI响应生成函数
+    """
+    import base64
+    import tempfile
+    import os
+    from django.core.files.storage import default_storage
+    from django.core.files.base import ContentFile
+    
+    try:
+        logger.info(f"开始处理图片AI响应: ConvID={conversation_id}, GenID={generation_id}")
+        
+        # 解码Base64文件数据
+        file_content = base64.b64decode(file_data)
+        
+        # 1. 保存图片到存储系统
+        saved_path = default_storage.save(f"uploads/{generation_id}_{file_name}", ContentFile(file_content))
+        logger.info(f"图片已保存到: {saved_path}")
+        
+        # 2. 更新用户消息内容，添加文件引用
+        await update_user_message_with_file(user_message_id, message, saved_path)
+        
+        # 3. 调用标准的AI响应生成函数
+        await generate_ai_response(
+            conversation_id=conversation_id,
+            model_id=model_id,
+            user_message_id=user_message_id,
+            is_regenerate=False,
+            generation_id=generation_id,
+            temp_id=temp_id,
+            is_streaming=is_streaming
+        )
+        
+    except Exception as e:
+        logger.error(f"图片AI响应生成失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        # 发送错误事件
+        await send_generation_event(conversation_id, 'generation_end', {
+            'generation_id': generation_id,
+            'status': 'failed',
+            'error': f'图片处理失败: {str(e)}'
+        })
+
+@database_sync_to_async
+def update_user_message_with_file(user_message_id, text_content, file_path):
+    """更新用户消息，添加文件引用"""
+    try:
+        message = Message.objects.get(id=user_message_id)
+        # 构建包含文件引用的消息内容
+        if text_content.strip():
+            message.content = f"{text_content}\n[file:{file_path}]"
+        else:
+            message.content = f"[file:{file_path}]"
+        message.save()
+        logger.info(f"已更新用户消息 {user_message_id}，添加文件引用: {file_path}")
+    except Message.DoesNotExist:
+        logger.error(f"无法找到用户消息 {user_message_id}")
+        raise

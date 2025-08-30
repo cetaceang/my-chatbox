@@ -1,0 +1,194 @@
+/* Custom Theme for My Chat App - Base (Study) Theme */
+/* Version: 2.0.0 */
+
+/* --- UI Beautification (Global) --- */
+
+/* 引入更现代的字体 */
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap');
+
+body {
+    background-color: #f4f7f9; /* 更柔和的背景色 */
+    font-family: 'Noto Sans SC', sans-serif; /* 应用新字体 */
+}
+
+.card {
+    border: none; /* 移除卡片边框 */
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08); /* 添加更柔和的阴影 */
+    border-radius: 12px; /* 增加圆角 */
+    background-color: #ffffff;
+}
+
+.card-header {
+    background: linear-gradient(to right, #ffffff, #f8f9fa); /* 添加微妙的渐变 */
+    border-bottom: 1px solid #e9ecef;
+    font-weight: 500;
+    color: #343a40;
+}
+
+.btn-primary {
+    background-color: #007bff;
+    border-color: #007bff;
+    transition: background-color 0.2s, border-color 0.2s;
+}
+
+.btn-primary:hover {
+    background-color: #0056b3;
+    border-color: #0056b3;
+}
+
+#message-container .message {
+    padding: 10px 15px;
+    margin-bottom: 10px;
+    max-width: 85%;
+    word-wrap: break-word;
+}
+
+#message-container .message.user {
+    background-color: #007bff;
+    color: white;
+    align-self: flex-end;
+    border-radius: 20px 20px 5px 20px;
+}
+
+#message-container .message.assistant {
+    background-color: #e9ecef;
+    color: #343a40;
+    align-self: flex-start;
+    border-radius: 20px 20px 20px 5px;
+}
+
+/* 对话列表美化 */
+#conversation-list .list-group-item {
+    border-radius: 8px !important;
+    margin-bottom: 5px;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+#conversation-list .list-group-item.active {
+    background-color: #007bff;
+    border-color: #007bff;
+    color: white;
+    font-weight: 500;
+}
+
+#conversation-list .list-group-item:not(.active):hover {
+    background-color: #e9ecef;
+}
+
+/* 输入框美化 */
+#message-input {
+    border-radius: 20px;
+    border-color: #ced4da;
+    box-shadow: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+#message-input:focus {
+    border-color: #80bdff;
+    box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+}
+
+/* --- Responsive Design --- */
+
+/* 默认隐藏汉堡菜单和侧边栏导航，仅在移动端媒体查询中显示 */
+#sidebar-toggler, .sidebar-nav-links {
+    display: none;
+}
+
+/* Mobile-specific overrides */
+@media (max-width: 767.98px) {
+    /* 导航栏布局调整 */
+    .navbar {
+        position: sticky;
+        top: 0;
+        z-index: 1020;
+    }
+    .navbar .container {
+        position: relative;
+    }
+    .navbar-brand {
+        padding-left: 40px; /* 为汉堡菜单留出空间 */
+    }
+
+    /* 汉堡菜单按钮 */
+    #sidebar-toggler {
+        display: block;
+        position: absolute;
+        top: 50%;
+        left: 0;
+        transform: translateY(-50%);
+        z-index: 1051;
+    }
+
+    /* 遮罩层 */
+    .overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.5);
+        z-index: 1040;
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.3s, visibility 0.3s;
+    }
+
+    .overlay.active {
+        opacity: 1;
+        visibility: visible;
+    }
+
+    /* 侧边栏中的导航链接 */
+    .sidebar-nav-links {
+        display: block;
+    }
+    .sidebar-nav-links .nav-link {
+        color: #495057;
+        font-weight: 500;
+        padding: 0.75rem 1rem;
+    }
+    .sidebar-nav-links .nav-link:hover {
+        background-color: #e9ecef;
+    }
+
+    /* 侧边栏 (直接修改 .col-md-3) */
+    .col-md-3 {
+        position: fixed;
+        top: 0;
+        left: -280px; /* 初始状态下隐藏在屏幕左侧 */
+        width: 280px;
+        height: 100%;
+        background-color: #fff;
+        z-index: 1050;
+        transition: left 0.3s ease-in-out;
+        padding: 1rem;
+        overflow-y: auto;
+        border-right: 1px solid #dee2e6;
+    }
+
+    .col-md-3.sidebar-active {
+        left: 0; /* 激活时滑入屏幕 */
+    }
+
+    /* 主内容区 (直接修改 .col-md-9) */
+    .col-md-9 {
+        width: 100%;
+        flex: 0 0 100%;
+        max-width: 100%;
+    }
+
+    /* 对话头部布局优化 */
+    .card-header > .d-flex {
+        flex-wrap: wrap; /* 允许换行 */
+        gap: 0.5rem; /* 增加元素间距 */
+    }
+    #conversation-title {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex-basis: 100%; /* 标题单独占一行 */
+        order: -1; /* 让标题始终在最前面 */
+        margin-bottom: 0.5rem;
+    }
+}

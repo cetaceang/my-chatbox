@@ -110,10 +110,14 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+# 数据库路径可以由环境变量 DATABASE_PATH 指定，否则默认为 BASE_DIR / 'db.sqlite3'
+# 这使得在 Docker 环境中可以轻松地将数据库文件放在持久化卷中
+DATABASE_PATH = os.getenv('DATABASE_PATH', BASE_DIR / 'db.sqlite3')
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': DATABASE_PATH,
     }
 }
 
@@ -171,11 +175,29 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Channels配置
 ASGI_APPLICATION = 'config.asgi.application'
-CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels.layers.InMemoryChannelLayer',
-    },
-}
+
+# Dynamic Channel Layer Configuration
+REDIS_HOST = os.getenv('REDIS_HOST')
+
+if REDIS_HOST:
+    # 动态构建标准的 Redis URL，将数据库编号 1 包含在内
+    redis_url = f"redis://{REDIS_HOST}:6379/1"
+
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {
+                # "hosts" 应该是一个包含 URL 字符串的列表
+                "hosts": [redis_url],
+            },
+        },
+    }
+else:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels.layers.InMemoryChannelLayer',
+        },
+    }
 
 # 登录URL配置
 LOGIN_URL = '/users/login/'

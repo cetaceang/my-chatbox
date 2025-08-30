@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  web:
+    # 使用 Docker Hub 上的镜像代替本地构建
+    # 请将 'your_dockerhub_username/my-chatbox:latest' 替换为你自己的镜像地址
+    image: cetaceang/my-chatbox:latest
+    container_name: my-chatbox-web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      # 数据库持久化：将宿主机的 ./data 目录映射到容器内
+      - ./data:/app/data
+      # 媒体文件持久化：将名为 media_data 的卷映射到容器内的 /app/media 目录
+      - ./media_data:/app/media
+    env_file:
+      - .env.docker
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=2
+      - DJANGO_SETTINGS_MODULE=config.settings
+    networks:
+      - shared-net
+    command: >
+      sh -c "python manage.py migrate &&
+             daphne -b 0.0.0.0 -p 3000 config.asgi:application"
+
+networks:
+  shared-net:
+    external: true

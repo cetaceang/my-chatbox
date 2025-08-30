@@ -1,0 +1,91 @@
+/* Fancy Theme for My Chat App */
+/* Contains styles for the "fancy" visual theme. */
+
+/* 动态渐变背景 */
+@keyframes gradient-animation {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+}
+
+body.theme-fancy {
+    background: linear-gradient(-45deg, #ee7752, #e73c7e, #23a6d5, #23d5ab);
+    background-size: 400% 400%;
+    animation: gradient-animation 15s ease infinite;
+    color: #333;
+}
+
+/* 玻璃拟态卡片 */
+body.theme-fancy .card {
+    background: rgba(255, 255, 255, 0.25);
+    box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-radius: 15px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+body.theme-fancy .card-header {
+    background: rgba(255, 255, 255, 0.2);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+    color: #2c3e50;
+}
+
+/* 动画按钮 */
+body.theme-fancy .btn-primary {
+    background-color: rgba(35, 166, 213, 0.8);
+    border: none;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+}
+
+body.theme-fancy .btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 10px rgba(35, 166, 213, 0.5);
+}
+
+/* 消息入场动画 */
+@keyframes message-in {
+    from {
+        opacity: 0;
+        transform: translateY(15px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+body.theme-fancy #message-container .message {
+    animation: message-in 0.4s ease-out;
+}
+
+/* 半透明消息气泡 */
+body.theme-fancy #message-container .message.user {
+    background: rgba(35, 166, 213, 0.7);
+    color: white;
+}
+
+body.theme-fancy #message-container .message.assistant {
+    background: rgba(255, 255, 255, 0.4);
+    color: #343a40;
+}
+
+/* 自定义滚动条 */
+body.theme-fancy #message-container::-webkit-scrollbar {
+    width: 8px;
+}
+
+body.theme-fancy #message-container::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+}
+
+body.theme-fancy #message-container::-webkit-scrollbar-thumb {
+    background: rgba(35, 166, 213, 0.5);
+    border-radius: 10px;
+}
+
+body.theme-fancy #message-container::-webkit-scrollbar-thumb:hover {
+    background: rgba(35, 166, 213, 0.8);
+}

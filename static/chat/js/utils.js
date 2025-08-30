@@ -2,6 +2,14 @@
 
 // --- Utility Functions ---
 
+// Utility function to generate a v4 UUID
+function generateUUID() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
+}
+
 // Utility function to escape HTML characters
 function escapeHtml(unsafe) {
     if (typeof unsafe !== 'string') {
@@ -33,6 +41,43 @@ function getCookie(name) {
     return cookieValue;
 }
 
+// --- 新增：聊天设置辅助函数 ---
+
+/**
+ * 从 localStorage 获取聊天设置
+ * @returns {object} 包含设置的对象
+ */
+function getChatSettings() {
+    const defaults = {
+        isStreaming: true,
+        typingSpeed: 15, // 默认快速
+    };
+    try {
+        const storedSettings = localStorage.getItem('chatAppSettings');
+        if (storedSettings) {
+            // 合并存储的设置和默认设置，以防未来新增设置项
+            return { ...defaults, ...JSON.parse(storedSettings) };
+        }
+    } catch (e) {
+        console.error("无法解析存储的设置:", e);
+    }
+    return defaults;
+}
+
+/**
+ * 将部分或全部设置保存到 localStorage
+ * @param {object} newSettings - 包含要更新的设置的对象
+ */
+function saveChatSettings(newSettings) {
+    try {
+        const currentSettings = getChatSettings();
+        const updatedSettings = { ...currentSettings, ...newSettings };
+        localStorage.setItem('chatAppSettings', JSON.stringify(updatedSettings));
+    } catch (e) {
+        console.error("无法保存设置:", e);
+    }
+}
+
 // 从localStorage获取之前保存的会话ID
 function getStoredConversationId() {
     return localStorage.getItem('currentConversationId');
@@ -46,26 +91,77 @@ function storeConversationId(id) {
     }
 }
 
-// 存储临时ID到实际ID的映射 - Shared utility state
-// Ensure tempIdMap is globally accessible if needed by other modules,
-// or pass it explicitly. For now, assuming global access via window.tempIdMap
-if (typeof window.tempIdMap === 'undefined') {
-    window.tempIdMap = {};
+// =========================================================================
+// 临时ID管理器 - 用于双向映射临时ID和真实ID
+// =========================================================================
+class TempIdManager {
+    constructor() {
+        this.tempToReal = {}; // temp-123 -> 456
+        this.realToTemp = {}; // 456 -> temp-123
+    }
+
+    set(tempId, realId) {
+        // Removed check for 'temp-' prefix to allow UUIDs as temp IDs.
+        console.log(`[TempIdManager] Mapping: ${tempId} <-> ${realId}`);
+        this.tempToReal[tempId] = realId;
+        this.realToTemp[realId] = tempId;
+    }
+
+    getRealId(tempId) {
+        return this.tempToReal[tempId] || null;
+    }
+
+    getTempId(realId) {
+        return this.realToTemp[realId] || null;
+    }
+
+    // 获取原始临时ID（以 "temp-" 开头）
+    getOriginalTempId(id) {
+        if (typeof id === 'string' && id.startsWith('temp-')) {
+            return id; // It's already the original temp ID
+        }
+        // It's a real ID, so look up its corresponding temp ID
+        const tempId = this.getTempId(id);
+        if (tempId) {
+            return tempId;
+        }
+        // 如果在映射中找不到，并且它不是以 "temp-" 开头，那么它可能是一个用于重新生成的真实ID
+        return id;
+    }
+
+    // 清除所有映射
+    clear() {
+        this.tempToReal = {};
+        this.realToTemp = {};
+        console.log("[TempIdManager] All mappings cleared.");
+    }
 }
-let tempIdMap = window.tempIdMap;
+
+// 创建全局ID管理器实例
+if (typeof window.tempIdManager === 'undefined') {
+    window.tempIdManager = new TempIdManager();
+}
+// 向后兼容旧的 tempIdMap
+let tempIdMap = window.tempIdManager.tempToReal;
 
 
 // 辅助函数：获取消息的真实ID（处理临时ID）
 function getRealMessageId(tempId) {
-    // 如果不是临时ID，直接返回
-    if (!tempId || !tempId.startsWith('temp-')) {
+    // Always try the map first, regardless of ID format.
+    if (!tempId) {
+        return null;
+    }
+
+    // 如果传入的ID已经是纯数字，直接返回，避免警告
+    if (/^\d+$/.test(tempId)) {
         return tempId;
     }
 
     // 尝试从映射表中获取
-    if (tempIdMap[tempId]) {
-        console.log(`From map: Real ID for ${tempId} -> ${tempIdMap[tempId]}`);
-        return tempIdMap[tempId];
+    const realId = window.tempIdManager.getRealId(tempId);
+    if (realId) {
+        console.log(`From map: Real ID for ${tempId} -> ${realId}`);
+        return realId;
     }
 
     // 尝试从DOM中获取 (Fallback, less reliable if DOM updates lag)
@@ -74,12 +170,12 @@ function getRealMessageId(tempId) {
 
     const msgDiv = messageContainer.querySelector(`.alert[data-temp-id="${tempId}"]`);
     if (msgDiv) {
-        const realId = msgDiv.getAttribute('data-message-id');
-        if (realId && !realId.startsWith('temp-')) {
+        const domRealId = msgDiv.getAttribute('data-message-id');
+        if (domRealId && !domRealId.startsWith('temp-')) {
             // Save to map
-            tempIdMap[tempId] = realId;
-            console.log(`From DOM: Real ID for ${tempId} -> ${realId}`);
-            return realId;
+            window.tempIdManager.set(tempId, domRealId);
+            console.log(`From DOM: Real ID for ${tempId} -> ${domRealId}`);
+            return domRealId;
         }
     }
 
@@ -102,20 +198,68 @@ class ChatStateManager {
 
     // 注册消息元素
     registerMessage(id, content, isUser, element) {
-        console.log(`[ChatState] Registering message ${id}`);
         if (this.messages[id]) {
-            console.warn(`[ChatState] Message ${id} already registered, updating`);
+            console.warn(`[ChatState] Message ${id} already registered, updating content and element.`);
+            this.messages[id].content = content;
+            this.messages[id].element = element;
+            this.messages[id].isUser = isUser; // Also update isUser status
+        } else {
+            console.log(`[ChatState] Registering new message ${id}`);
+            this.messages[id] = {
+                content,
+                isUser,
+                element,
+                version: 1,
+                isUpdating: false
+            };
         }
         
-        this.messages[id] = {
-            content,
-            isUser,
-            element,
-            version: 1,
-            isUpdating: false
-        };
+        // Notify listeners about the registration/update
+        this._notifyListeners({
+            type: 'message_registered',
+            id: id,
+            content: content
+        });
         
         return this.messages[id];
+    }
+
+    // 新增：更新消息ID（从临时ID到真实ID）
+    updateMessageId(oldId, newId) {
+        console.log(`[ChatState] Updating message ID from ${oldId} to ${newId}`);
+        if (this.messages[oldId]) {
+            // 检查新ID是否已存在
+            if (this.messages[newId]) {
+                console.warn(`[ChatState] New ID ${newId} already exists. Merging data.`);
+                // 合并数据，以oldId的数据为准
+                this.messages[newId] = { ...this.messages[newId], ...this.messages[oldId] };
+            } else {
+                this.messages[newId] = this.messages[oldId];
+            }
+            
+            delete this.messages[oldId];
+            
+            // 更新updateQueue
+            if (this.updateQueue[oldId]) {
+                if (this.updateQueue[newId]) {
+                    this.updateQueue[newId] = [...this.updateQueue[oldId], ...this.updateQueue[newId]];
+                } else {
+                    this.updateQueue[newId] = this.updateQueue[oldId];
+                }
+                delete this.updateQueue[oldId];
+            }
+            
+            // 通知监听器ID已更新
+            this._notifyListeners({
+                type: 'message_id_updated',
+                oldId,
+                newId
+            });
+            
+            return true;
+        }
+        console.warn(`[ChatState] Cannot update ID: old ID ${oldId} not found.`);
+        return false;
     }
 
     // 获取消息状态
@@ -268,23 +412,29 @@ class MessageComponentFactory {
 
     // 创建用户消息组件
     createUserMessage(id, content) {
-        console.log(`[MessageFactory] Creating user message ${id}`);
-        
-        // 创建消息元素
-        const messageDiv = document.createElement('div');
-        messageDiv.className = 'alert alert-primary';
-        messageDiv.setAttribute('data-message-id', id);
-        
-        if (id.startsWith('temp-')) {
+        // 检查消息是否已存在
+        let message = this.stateManager.getMessage(id);
+        let messageDiv;
+
+        if (message && message.element) {
+            console.log(`[MessageFactory] Message ${id} already exists. Updating content.`);
+            messageDiv = message.element;
+            // 更新内容和DOM
+            this.stateManager.updateMessage(id, content);
+        } else {
+            console.log(`[MessageFactory] Creating new user message ${id}`);
+            // 创建消息元素
+            messageDiv = document.createElement('div');
+            messageDiv.className = 'alert alert-primary';
+            messageDiv.setAttribute('data-message-id', id);
             messageDiv.setAttribute('data-temp-id', id);
-            messageDiv.setAttribute('data-waiting-id', '1');
+            
+            // 构建消息内容
+            this._buildMessageStructure(messageDiv, content, true);
+            
+            // 注册到状态管理器
+            this.stateManager.registerMessage(id, content, true, messageDiv);
         }
-        
-        // 构建消息内容
-        this._buildMessageStructure(messageDiv, content, true);
-        
-        // 注册到状态管理器
-        this.stateManager.registerMessage(id, content, true, messageDiv);
         
         return messageDiv;
     }
@@ -311,10 +461,10 @@ class MessageComponentFactory {
     }
 
     // 创建加载指示器
-    createLoadingIndicator() {
+    createLoadingIndicator(id) {
         const loadingDiv = document.createElement('div');
         loadingDiv.className = 'alert alert-secondary';
-        loadingDiv.id = 'ai-response-loading';
+        loadingDiv.id = id || 'ai-response-loading'; // Use provided ID or a default
         
         const timestamp = new Date().toLocaleTimeString();
         
@@ -358,47 +508,30 @@ class MessageComponentFactory {
             console.warn(`[MessageFactory] Cannot update DOM for message ${id}, not found or no element`);
             return false;
         }
-        
-        console.log(`[MessageFactory] Updating DOM for message ${id}`);
-        
-        // 获取或创建渲染目标
-        let renderTarget = message.element.querySelector('p > .render-target');
-        
-        if (!renderTarget) {
-            console.log(`[MessageFactory] Creating new render target for ${id}`);
-            const p = message.element.querySelector('p');
-            if (!p) {
-                const pElement = document.createElement('p');
-                message.element.appendChild(pElement);
-                renderTarget = document.createElement('span');
-                renderTarget.className = 'render-target';
-                pElement.appendChild(renderTarget);
-            } else {
-                p.innerHTML = '';
-                renderTarget = document.createElement('span');
-                renderTarget.className = 'render-target';
-                p.appendChild(renderTarget);
-            }
-        }
-        
-        // 更新渲染目标
-        renderTarget.setAttribute('data-original-content', message.content);
-        renderTarget.removeAttribute('data-rendered');
-        
-        // 清空内容
-        renderTarget.innerHTML = '';
-        
-        // 重新渲染
+
+        console.log(`[MessageFactory] Updating DOM for message ${id} by rebuilding structure.`);
+
+        // 1. 清空现有内容
+        message.element.innerHTML = '';
+
+        // 2. 使用 _buildMessageStructure 重建整个消息的 HTML 结构
+        this._buildMessageStructure(message.element, message.content, message.isUser);
+
+        // 3. 重新渲染内容（Markdown, KaTeX 等）
         if (typeof renderMessageContent === 'function') {
             setTimeout(() => {
-                console.log(`[MessageFactory] Triggering render for ${id}`);
+                console.log(`[MessageFactory] Triggering render for rebuilt message ${id}`);
                 renderMessageContent(message.element);
             }, 0);
         } else {
             console.error('[MessageFactory] renderMessageContent function not available');
-            renderTarget.textContent = message.content;
+            // Fallback: just set the text content if render function is missing
+            const renderTarget = message.element.querySelector('.render-target');
+            if (renderTarget) {
+                renderTarget.textContent = message.content;
+            }
         }
-        
+
         return true;
     }
 
@@ -436,7 +569,7 @@ class MessageComponentFactory {
                 </div>
             </div>
             <hr>
-            <p><span class="render-target" data-original-content="${escapeHtml(content)}"></span></p>
+            <p><span class="render-target" data-original-content="${escapeHtml(content)}">${escapeHtml(content)}</span></p>
         `;
     }
 }

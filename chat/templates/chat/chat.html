@@ -1,16 +1,40 @@
 {% extends "base.html" %}
 {% load static %}
-<!-- 版本号：1.0.1 -->
+<!-- 版本号：1.0.2 -->
 
-{% block extra_head %}
+{% block extra_css %}
 <link rel="stylesheet" href="{% static 'chat/css/chat_page.css' %}">
+<link rel="stylesheet" href="{% static 'chat/css/custom_theme.css' %}">
+<!-- 默认禁用的花哨主题 -->
+<link id="fancy-theme-link" rel="stylesheet" href="{% static 'chat/css/fancy_theme.css' %}" disabled>
 {% endblock %}
 
 {% block content %}
+<!-- 汉堡菜单按钮，其显示/隐藏由 custom_theme.css 控制 -->
+<button class="btn btn-primary" id="sidebar-toggler" type="button">
+    <i class="bi bi-list"></i>
+</button>
+<div class="overlay"></div>
+
 <div class="container py-4">
     <div class="row">
         <!-- 侧边栏 -->
-        <div class="col-md-4">
+        <div class="col-md-3">
+            <!-- 导航链接从 base.html 复制到这里，仅在侧边栏中显示 -->
+            <div class="sidebar-nav-links mb-4">
+                <ul class="nav flex-column">
+                    <li class="nav-item">
+                        <a class="nav-link" href="{% url 'chat-main' %}?no_new=1">聊天</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{% url 'chat-history' %}">历史</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{% url 'chat-settings' %}">设置</a>
+                    </li>
+                </ul>
+                <hr>
+            </div>
             <div class="card mb-4">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <span>对话列表</span>
@@ -25,15 +49,59 @@
         </div>
 
         <!-- 主聊天区 -->
-        <div class="col-md-8">
+        <div class="col-md-9">
             <div class="card">
                 <div class="card-header d-flex justify-content-between align-items-center">
-                    <span>当前对话：{{ conversation.title }}</span>
-                    <select id="model-select" class="form-select form-select-sm" style="width: auto">
-                        {% for model in models %}
-                        <option value="{{ model.id }}" {% if conversation.selected_model.id == model.id %}selected{% endif %}>{{ model.display_name }}</option>
-                        {% endfor %}
-                    </select>
+                    <span id="conversation-title">当前对话：{{ conversation.title }}</span>
+                    <div class="d-flex align-items-center">
+                        <button id="system-prompt-btn" class="btn btn-sm btn-outline-secondary me-2" title="设置系统提示词" data-bs-toggle="modal" data-bs-target="#systemPromptModal">
+                            <i class="bi bi-gear"></i> <span></span>系统提示词</span>
+                        </button>
+                        <button id="clear-conversation-btn" class="btn btn-sm btn-outline-warning me-2" title="清除所有消息">
+                            <i class="bi bi-eraser"></i> <span>清除消息</span>
+                        </button>
+                        <select id="model-select" class="form-select form-select-sm" style="width: auto;">
+                            {% for model in models %}
+                            <option value="{{ model.id }}" {% if conversation.selected_model.id == model.id %}selected{% endif %}>{{ model.display_name }}</option>
+                            {% endfor %}
+                        </select>
+                        <!-- 新增设置下拉菜单 -->
+                        <div class="dropdown ms-2">
+                            <button class="btn btn-sm btn-outline-secondary" type="button" id="settings-dropdown-btn" data-bs-toggle="dropdown" aria-expanded="false" title="设置">
+                                <i class="bi bi-sliders"></i>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="settings-dropdown-btn">
+                                <li>
+                                    <div class="px-3 py-1">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" role="switch" id="streaming-toggle" checked>
+                                            <label class="form-check-label" for="streaming-toggle">流式响应</label>
+                                        </div>
+                                    </div>
+                                </li>
+                                <li>
+                                    <label for="typing-speed-select" class="px-3 py-1 form-label">打字机速度</label>
+                                    <div class="px-3">
+                                        <select id="typing-speed-select" class="form-select form-select-sm">
+                                            <option value="50">慢速</option>
+                                            <option value="30">中速</option>
+                                            <option value="15" selected>快速</option>
+                                            <option value="5">极速</option>
+                                        </select>
+                                    </div>
+                                </li>
+                                <li><hr class="dropdown-divider"></li>
+                                <li>
+                                    <div class="px-3 py-1">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" role="switch" id="theme-toggle">
+                                            <label class="form-check-label" for="theme-toggle">启用花哨主题</label>
+                                        </div>
+                                    </div>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
                 </div>
                 
                 <div class="card-body chat-container">
@@ -53,8 +121,27 @@
                     </div>
                     <!-- 隐藏的文件上传控件 -->
                     <input type="file" id="file-upload" style="display: none">
-                    <!-- 移除独立的终止生成按钮容器 -->
                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 系统提示词模态框 (Bootstrap 5) -->
+<div class="modal fade" id="systemPromptModal" tabindex="-1" aria-labelledby="systemPromptModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="systemPromptModalLabel">设置系统提示词</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small">系统提示词将作为最高优先级指令，在每次请求时发送给AI模型。</p>
+                <textarea id="system-prompt-input" class="form-control" rows="8" placeholder="例如：你是一个专业的Python程序员，请用中文回答。"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="system-prompt-save-btn">保存</button>
             </div>
         </div>
     </div>
@@ -75,26 +162,28 @@
 
 <!-- Define global variables needed by external scripts -->
 <script>
-    // Set the global conversationId from Django template context
-    // This needs to be defined BEFORE chat_page.js runs.
-    const conversationIdRaw = '{% if conversation %}{{ conversation.id }}{% else %}{% endif %}'; // Get ID as string or empty
-    window.conversationId = conversationIdRaw ? conversationIdRaw : null; // Assign string ID or null
-    // Initialize tempIdMap globally so it's available to all modules
+    const conversationIdRaw = '{% if conversation %}{{ conversation.id }}{% else %}{% endif %}';
+    window.conversationId = conversationIdRaw ? conversationIdRaw : null;
     window.tempIdMap = {};
+    // 将系统提示词也存储在全局变量中
+    window.systemPrompt = `{{ conversation.system_prompt|escapejs|default:'' }}`;
 </script>
 
 <!-- Load External JavaScript Modules -->
-<!-- utils.js contains shared functions and needs to be loaded first -->
+<script defer src="{% static 'chat/js/marked.min.js' %}"></script>
 <script defer src="{% static 'chat/js/utils.js' %}"></script>
-<!-- state_manager.js should be loaded early -->
+<script defer src="{% static 'chat/js/responsive_handler.js' %}"></script>
 <script defer src="{% static 'chat/js/state_manager.js' %}"></script>
-<!-- message_renderer.js depends on utils.js (escapeHtml) -->
 <script defer src="{% static 'chat/js/message_renderer.js' %}"></script>
-<!-- websocket_handler.js depends on utils.js and message_renderer.js -->
 <script defer src="{% static 'chat/js/websocket_handler.js' %}"></script>
-<!-- api_handler.js depends on utils.js and message_renderer.js -->
 <script defer src="{% static 'chat/js/api_handler.js' %}"></script>
-<!-- chat_page.js orchestrates everything and should be loaded last -->
+<script defer src="{% static 'chat/js/settings_handler.js' %}"></script>
+<script defer src="{% static 'chat/js/image_handler.js' %}"></script>
+<script defer src="{% static 'chat/js/ui_handler.js' %}"></script>
+<script defer src="{% static 'chat/js/event_listeners.js' %}"></script>
 <script defer src="{% static 'chat/js/chat_page.js' %}"></script>
+<!-- 新的JS文件 -->
+<script defer src="{% static 'chat/js/system_prompt.js' %}"></script>
+<script defer src="{% static 'chat/js/theme_switcher.js' %}"></script>
 
 {% endblock %}

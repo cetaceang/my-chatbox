@@ -13,17 +13,19 @@ urlpatterns = [
     path('api/models/', admin_api.get_models_api, name='api-models'),
     path('api/providers/', admin_api.manage_providers_api, name='api-providers'),
     path('api/test-connection/<int:provider_id>/', admin_api.test_api_connection, name='api-test-connection'),
+    path('api/fetch-models/<int:provider_id>/', admin_api.fetch_provider_models, name='api-fetch-models'),
+    path('api/batch-add-models/', admin_api.batch_add_models, name='api-batch-add-models'),
     path('api/admin/users/', admin_api.list_users_api, name='api-admin-list-users'), # 新增：获取用户列表
     path('api/admin/manage_user_ban/', admin_api.manage_user_ban_status, name='api-admin-manage-user-ban'), # 新增：管理用户封禁状态
     path('api/debug/', admin_api.debug_api_response, name='api-debug'),
     path('api/debug_response/', api.debug_response_api, name='api-debug-response'),
 
     # API接口 - Core Chat
-    path('api/chat/', api.chat_api, name='api-chat'),
+    path('api/chat/', api.chat_api, name='api-chat'), # 新增：统一聊天API
     path('api/upload_file/', api.upload_file_api, name='api-upload-file'),  # 新增：文件上传API
     path('api/conversations/', api.conversations_api, name='api-conversations'),
+    path('api/conversations/<int:conversation_id>/clear/', api.clear_conversation_api, name='api-clear-conversation'),
     path('api/messages/edit/', api.edit_message_api, name='api-edit-message'),
-    path('api/messages/regenerate/', api.regenerate_message_api, name='api-regenerate-message'),
     path('api/messages/delete/', api.delete_message_api, name='api-delete-message'),
     path('api/messages/<str:conversation_id>/', api.messages_api, name='api-messages'),
     path('api/sync_conversation/', api.sync_conversation_api, name='api-sync-conversation'),

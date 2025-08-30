@@ -13,7 +13,7 @@ from django.utils import timezone # Added import
 from datetime import timedelta # Added import
 
 from chat.models import AIProvider, AIModel
-from .utils import ensure_valid_api_url # Import from local utils
+from chat.utils import ensure_valid_api_url # Import from local utils
 from .decorators import admin_required # Import from local decorators
 from users.models import UserProfile # Assuming UserProfile is in users.models
 from .api import is_user_admin  # 导入辅助函数
@@ -600,6 +600,196 @@ def manage_user_ban_status(request):
             'success': False,
             'message': f"操作失败: {str(e)}"
         }, status=500)
+
+
+@admin_required
+@require_http_methods(["GET"])
+def fetch_provider_models(request, provider_id):
+    """从服务提供商API获取可用模型列表 (管理员)"""
+    try:
+        provider = get_object_or_404(AIProvider, id=provider_id)
+
+        # 构建API URL
+        api_url = ensure_valid_api_url(provider.base_url, "/v1/models")
+
+        # 发送请求
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {provider.api_key}"
+        }
+
+        logger.info(f"获取模型列表: {api_url}")
+
+        try:
+            response = requests.get(
+                api_url,
+                headers=headers,
+                timeout=15
+            )
+
+            if response.status_code == 200:
+                try:
+                    response_data = response.json()
+                    
+                    # 提取模型列表
+                    models_list = []
+                    if 'data' in response_data and isinstance(response_data['data'], list):
+                        # 获取已存在的模型，用于检查重复
+                        existing_models = AIModel.objects.filter(provider=provider).values_list('model_name', flat=True)
+                        
+                        for model_data in response_data['data']:
+                            model_id = model_data.get('id')
+                            if model_id:
+                                # 检查模型是否已存在
+                                is_existing = model_id in existing_models
+                                
+                                # 构建模型信息
+                                model_info = {
+                                    'model_name': model_id,
+                                    'display_name': model_id,  # 默认使用模型ID作为显示名称
+                                    'is_existing': is_existing
+                                }
+                                
+                                # 尝试获取更多模型信息
+                                if isinstance(model_data, dict):
+                                    # 获取上下文长度 (如果有)
+                                    context_length = None
+                                    if 'context_length' in model_data:
+                                        context_length = model_data['context_length']
+                                    elif 'max_tokens' in model_data:
+                                        context_length = model_data['max_tokens']
+                                    
+                                    if context_length:
+                                        model_info['max_context'] = context_length
+                                
+                                models_list.append(model_info)
+                        
+                        return JsonResponse({
+                            'success': True,
+                            'provider_id': provider.id,
+                            'provider_name': provider.name,
+                            'models': models_list
+                        })
+                    else:
+                        return JsonResponse({
+                            'success': False,
+                            'message': "API响应格式不正确，无法提取模型列表",
+                            'response_data': response_data
+                        }, status=400)
+                
+                except json.JSONDecodeError:
+                    return JsonResponse({
+                        'success': False,
+                        'message': "API响应不是有效的JSON格式",
+                        'raw_response': response.text[:500]
+                    }, status=400)
+            else:
+                # 处理错误响应
+                try:
+                    error_data = response.json()
+                    error_message = error_data.get('error', {}).get('message', '未知错误')
+                except:
+                    error_message = f"HTTP错误: {response.status_code}"
+                
+                return JsonResponse({
+                    'success': False,
+                    'message': f"获取模型列表失败: {error_message}",
+                    'status_code': response.status_code
+                }, status=400)
+        
+        except requests.exceptions.RequestException as e:
+            logger.error(f"获取模型列表失败: {str(e)}")
+            return JsonResponse({
+                'success': False,
+                'message': f"请求失败: {str(e)}"
+            }, status=500)
+    
+    except Exception as e:
+        logger.error(f"获取模型列表时出错: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'message': f"处理请求失败: {str(e)}"
+        }, status=500)
+
+
+@admin_required
+@csrf_exempt
+@require_http_methods(["POST"])
+def batch_add_models(request):
+    """批量添加AI模型 (管理员)"""
+    try:
+        data = json.loads(request.body)
+        provider_id = data.get('provider_id')
+        models_data = data.get('models', [])
+        
+        if not provider_id or not models_data or not isinstance(models_data, list):
+            return JsonResponse({
+                'success': False,
+                'message': "缺少必要参数 (provider_id, models)"
+            }, status=400)
+        
+        provider = get_object_or_404(AIProvider, id=provider_id)
+        
+        # 记录成功和失败的模型
+        success_models = []
+        failed_models = []
+        
+        for model_info in models_data:
+            try:
+                # 验证必要字段
+                if not model_info.get('model_name') or not model_info.get('display_name'):
+                    failed_models.append({
+                        'model_name': model_info.get('model_name', 'Unknown'),
+                        'error': "缺少必要的模型信息 (model_name, display_name)"
+                    })
+                    continue
+                
+                # 检查模型是否已存在
+                if AIModel.objects.filter(provider=provider, model_name=model_info['model_name']).exists():
+                    failed_models.append({
+                        'model_name': model_info['model_name'],
+                        'error': "模型已存在"
+                    })
+                    continue
+                
+                # 创建模型
+                model = AIModel.objects.create(
+                    provider=provider,
+                    model_name=model_info['model_name'],
+                    display_name=model_info['display_name'],
+                    max_context=model_info.get('max_context', 4096),
+                    max_history_messages=model_info.get('max_history_messages', 10),
+                    is_active=model_info.get('is_active', True),
+                    default_params=model_info.get('default_params', {})
+                )
+                
+                success_models.append({
+                    'id': model.id,
+                    'model_name': model.model_name,
+                    'display_name': model.display_name
+                })
+            
+            except Exception as e:
+                logger.error(f"添加模型 {model_info.get('model_name', 'Unknown')} 失败: {str(e)}")
+                failed_models.append({
+                    'model_name': model_info.get('model_name', 'Unknown'),
+                    'error': str(e)
+                })
+        
+        # 返回结果
+        return JsonResponse({
+            'success': True,
+            'message': f"批量添加模型完成: 成功 {len(success_models)} 个, 失败 {len(failed_models)} 个",
+            'success_models': success_models,
+            'failed_models': failed_models
+        })
+    
+    except Exception as e:
+        logger.error(f"批量添加模型失败: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'message': f"批量添加失败: {str(e)}"
+        }, status=400)
 
 
 @admin_required # Only admins should use the raw debug endpoint

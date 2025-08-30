@@ -19,12 +19,13 @@ from .models import Conversation, Message, AIModel
 from .state_utils import get_stop_requested_sync, set_stop_requested_sync, clear_stop_request_state_sync
 # --- Import response handlers ---
 from .response_handlers import extract_response_content, ResponseExtractionError
+from .services import generate_ai_response, generate_ai_response_with_image # 导入新的服务函数
+import asyncio # 导入 asyncio
 
 logger = logging.getLogger(__name__)
 
 # 配置常量
-AI_REQUEST_TIMEOUT = 300  # AI请求超时时间（秒）
-AI_REQUEST_MAX_RETRIES = 2  # AI请求最大重试次数
+# AI_REQUEST_TIMEOUT 和 AI_REQUEST_MAX_RETRIES 将在 services.py 中使用
 
 # --- REMOVED Old State Management ---
 # STOP_STATE, SYNC_STOP_STATE_LOCK, _get_stop_state_sync, _set_stop_state_sync,
@@ -42,14 +43,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.close()
             return
 
-        self.conversation_id = self.scope['url_route']['kwargs']['conversation_id']
+        conversation_id_str = self.scope['url_route']['kwargs'].get('conversation_id')
 
-        # 验证对话归属
-        if not await self.validate_conversation_ownership(user):
-            await self.close()
-            return
-
-        self.conversation_group_name = f'chat_{self.conversation_id}'
+        # 处理新会话的情况
+        if not conversation_id_str or conversation_id_str.lower() == 'new':
+            self.conversation_id = None
+            self.conversation_group_name = f'user_{user.id}_new_conversation'
+        else:
+            self.conversation_id = conversation_id_str
+            # 验证对话归属
+            if not await self.validate_conversation_ownership(user):
+                await self.close()
+                return
+            self.conversation_group_name = f'chat_{self.conversation_id}'
 
         # 加入对话组
         await self.channel_layer.group_add(
@@ -65,13 +71,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self.termination_message_sent = False  # 标记是否已发送终止消息
         self.current_generation_id = None # Add generation ID tracking
         # 添加一个锁，用于同步终止请求和发送回复
-        # 添加一个锁，用于同步终止请求和发送回复 (Still useful for local task cancellation)
         self.response_lock = asyncio.Lock()
 
         # 初始化/清除全局终止状态 (使用新的同步函数)
-        # No need for await, call sync function directly
-        set_stop_requested_sync(self.conversation_id, False)
-        logger.info(f"Consumer connected, ensured stop state is False for {self.conversation_id}")
+        if self.conversation_id:
+            set_stop_requested_sync(self.conversation_id, False)
+            logger.info(f"Consumer connected for existing conversation {self.conversation_id}, ensured stop state is False.")
+        else:
+            logger.info(f"Consumer connected for a new conversation.")
 
     async def disconnect(self, close_code):
         # 离开对话组
@@ -107,11 +114,20 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
                 # --- MODIFIED: Add TTL when setting stop state ---
                 stop_ttl = 60 # Set TTL to 60 seconds
+                if not generation_id_to_stop:
+                    logger.warning(f"Consumer.receive: Stop request for conversation {self.conversation_id} did not include 'generation_id'. Attempting to fetch from DB.")
+                    generation_id_to_stop = await self.get_current_generation_id(self.conversation_id)
+                    if generation_id_to_stop:
+                        logger.info(f"Consumer.receive: Fetched active generation ID from DB: {generation_id_to_stop}")
+                    else:
+                        logger.error(f"Consumer.receive: Could not find an active generation_id in the database for conversation {self.conversation_id}. Cannot target stop request.")
+
                 if generation_id_to_stop:
                     logger.info(f"Consumer.receive: Requesting stop for conversation {self.conversation_id}, targeting generation ID {generation_id_to_stop}. Setting Redis flag with TTL={stop_ttl}s.")
                     set_stop_requested_sync(self.conversation_id, True, generation_id_to_stop=str(generation_id_to_stop), ttl=stop_ttl)
                 else:
-                    logger.error(f"Consumer.receive: WebSocket stop_generation message for conversation {self.conversation_id} did NOT include 'generation_id'. Setting general stop flag with TTL={stop_ttl}s.")
+                    # Fallback if we still don't have an ID
+                    logger.error(f"Consumer.receive: No generation_id available. Setting a general (non-targeted) stop flag for conversation {self.conversation_id} with TTL={stop_ttl}s.")
                     set_stop_requested_sync(self.conversation_id, True, ttl=stop_ttl)
                 # --- END MODIFIED ---
 
@@ -121,104 +137,148 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         self.active_request_task.cancel()
                         self.active_request_task = None
 
-                await self.send_status_message('', clear=True)
-                await self.channel_layer.group_send(
-                    self.conversation_group_name,
-                    {'type': 'generation_stopped', 'message': '用户终止了生成'}
-                )
+                await self.status_message({'message': '', 'clear': True})
                 return # Stop processing after handling stop request
 
-            # --- Get Message Data ---
-            message = text_data_json.get('message')
-            model_id = text_data_json.get('model_id')
-            temp_id = text_data_json.get('temp_id', None)
+            # --- 新的统一消息处理逻辑 ---
+            message_type = text_data_json.get('type', 'chat_message') # 默认为聊天消息
 
-            if not message or not model_id:
-                await self.send(text_data=json.dumps({'type': 'error', 'message': '缺少必要参数'}))
-                return
+            # 如果是新会话，先创建会话
+            if not self.conversation_id:
+                if message_type not in ['chat_message', 'regenerate', 'image_upload']:
+                    await self.send_error("新会话的第一个事件必须是 'chat_message'、'regenerate' 或 'image_upload'")
+                    return
+                
+                new_conversation = await self.create_new_conversation(self.scope["user"])
+                if not new_conversation:
+                    await self.send_error("创建新会话失败")
+                    return
+                
+                self.conversation_id = new_conversation.id
+                
+                # 更新 group name 并重新订阅
+                old_group_name = self.conversation_group_name
+                self.conversation_group_name = f'chat_{self.conversation_id}'
+                await self.channel_layer.group_discard(old_group_name, self.channel_name)
+                await self.channel_layer.group_add(self.conversation_group_name, self.channel_name)
+                
+                # 通知客户端新的会话ID
+                await self.send(text_data=json.dumps({
+                    'type': 'new_conversation_created',
+                    'data': {
+                        'conversation_id': self.conversation_id,
+                        'title': new_conversation.title
+                    }
+                }))
 
-            # --- Validate Conversation and Save User Message (Inner Try/Except 1) ---
-            user_message = None # Initialize user_message
-            try:
-                conversation_id = self.conversation_id
-                conversation = await self.get_conversation(conversation_id)
-                if not conversation:
-                    await self.send(text_data=json.dumps({'type': 'error', 'message': '会话不存在'}))
+            if message_type == 'chat_message':
+                message = text_data_json.get('message')
+                model_id = text_data_json.get('model_id')
+                generation_id = text_data_json.get('generation_id') # This is the single, unique ID from the frontend
+                is_streaming = text_data_json.get('is_streaming', True)
+
+                if not message or not model_id or not generation_id:
+                    await self.send_error("缺少必要参数 (message, model_id, generation_id)")
                     return
 
-                user_message = await self.save_user_message(conversation, message, model_id)
+                # 保存用户消息
+                user_message = await self.save_user_message(self.conversation_id, message, model_id)
+                if not user_message:
+                    await self.send_error("保存用户消息失败")
+                    return
+                
+                # 向客户端确认用户消息已保存，并更新ID
+                # The 'temp_id' for the user message div is the generation_id
+                await self.send(text_data=json.dumps({
+                    'type': 'user_message_id_update',
+                    'temp_id': generation_id,
+                    'user_message_id': user_message['id']
+                }))
 
-                if temp_id:
-                    logger.info(f"WebSocket临时ID映射: {temp_id} -> {user_message['id']}")
-                    await self.send(text_data=json.dumps({
-                        'type': 'user_message_id_update',
-                        'temp_id': temp_id,
-                        'user_message_id': user_message['id']
-                    }))
-
-                if not temp_id:
-                    await self.channel_layer.group_send(
-                        self.conversation_group_name,
-                        {
-                            'type': 'chat_message',
-                            'message': message,
-                            'is_user': True,
-                            'timestamp': str(user_message['timestamp']),
-                            'message_id': user_message['id']
-                        }
+                # Pass the single, trusted generation_id to the service
+                asyncio.create_task(
+                    generate_ai_response(
+                        conversation_id=self.conversation_id,
+                        model_id=model_id,
+                        user_message_id=user_message['id'],
+                        is_regenerate=False,
+                        generation_id=generation_id,
+                        temp_id=generation_id, # temp_id is the same as generation_id
+                        is_streaming=is_streaming
                     )
-            except Exception as e: # Catch errors during setup before AI call
-                logger.error(f"处理用户消息或会话时出错: {str(e)}")
-                import traceback
-                logger.error(traceback.format_exc())
+                )
+
+            elif message_type == 'regenerate':
+                message_id = text_data_json.get('message_id')
+                model_id = text_data_json.get('model_id')
+                generation_id = text_data_json.get('generation_id') # This is the single, unique ID from the frontend
+                is_streaming = text_data_json.get('is_streaming', True)
+
+                if not message_id or not model_id or not generation_id:
+                    await self.send_error("缺少必要参数 (message_id, model_id, generation_id)")
+                    return
+                
+                # Pass the single, trusted generation_id to the service
+                asyncio.create_task(
+                    generate_ai_response(
+                        conversation_id=self.conversation_id,
+                        model_id=model_id,
+                        user_message_id=message_id,
+                        is_regenerate=True,
+                        generation_id=generation_id,
+                        temp_id=generation_id, # temp_id is the same as generation_id
+                        is_streaming=is_streaming
+                    )
+                )
+                # --- END CORE CHANGE ---
+
+            elif message_type == 'image_upload':
+                # 处理图片上传消息
+                message = text_data_json.get('message', '')  # 用户输入的文本（可选）
+                model_id = text_data_json.get('model_id')
+                generation_id = text_data_json.get('generation_id')
+                temp_id = text_data_json.get('temp_id')
+                file_data = text_data_json.get('file_data')  # Base64编码的文件数据
+                file_name = text_data_json.get('file_name')
+                file_type = text_data_json.get('file_type')
+                is_streaming = text_data_json.get('is_streaming', True)
+
+                if not model_id or not generation_id or not temp_id or not file_data:
+                    await self.send_error("缺少必要参数 (model_id, generation_id, temp_id, file_data)")
+                    return
+
+                # 保存用户消息（包含文本和图片信息）
+                display_message = message if message.strip() else '[图片上传]'
+                user_message = await self.save_user_message(self.conversation_id, display_message, model_id)
+                if not user_message:
+                    await self.send_error("保存用户消息失败")
+                    return
+                
+                # 向客户端确认用户消息已保存，并更新ID
                 await self.send(text_data=json.dumps({
-                    'type': 'error',
-                    'message': f'处理用户消息或会话时出错: {str(e)}'
+                    'type': 'user_message_id_update',
+                    'temp_id': temp_id,
+                    'user_message_id': user_message['id']
                 }))
-                return # Stop processing if setup failed
 
-            # --- Process AI Response (Inner Try/Except 2) ---
-            # Ensure user_message was successfully created before proceeding
-            if not user_message:
-                 logger.error("User message object is None, cannot proceed with AI response.")
-                 await self.send(text_data=json.dumps({'type': 'error', 'message': '无法处理AI回复，因为用户消息保存失败。'}))
-                 return
-
-            try:
-                # Reset flags, generate ID, save ID, send start signal
-                self.stop_requested = False
-                self.termination_message_sent = False
-                generation_id = str(uuid.uuid4())
-                self.current_generation_id = generation_id
-                logger.info(f"Starting AI response generation with ID: {generation_id} for conversation {self.conversation_id}")
-                await self.set_db_generation_id(self.conversation_id, generation_id)
-                await self.send(text_data=json.dumps({
-                    'type': 'generation_start',
-                    'generation_id': generation_id,
-                    'temp_id': temp_id
-                }))
-                logger.info(f"Sent generation_start signal for GenID: {generation_id}, TempID: {temp_id}")
-
-                # Call process_ai_response
-                await self.process_ai_response(model_id, user_message['id'], generation_id)
-
-            except Exception as e: # Catch errors during AI processing call/setup
-                generation_id_to_clear = None
-                if hasattr(self, 'current_generation_id') and self.current_generation_id:
-                    generation_id_to_clear = self.current_generation_id
-                    logger.error(f"处理AI回复时出错 (clearing generation ID {generation_id_to_clear}): {str(e)}")
-                    if hasattr(self, 'conversation_id') and self.conversation_id and generation_id_to_clear:
-                        await self.clear_db_generation_id(self.conversation_id, generation_id_to_clear)
-                    self.current_generation_id = None
-                else:
-                    logger.error(f"处理AI回复时出错 (no generation ID set): {str(e)}")
-
-                import traceback
-                logger.error(traceback.format_exc())
-                await self.send(text_data=json.dumps({
-                    'type': 'error',
-                    'message': f'处理AI回复失败: {str(e)}'
-                }))
+                # 调用图片处理服务 - 使用generation_id作为temp_id（与纯文本发送保持一致）
+                asyncio.create_task(
+                    generate_ai_response_with_image(
+                        conversation_id=self.conversation_id,
+                        model_id=model_id,
+                        user_message_id=user_message['id'],
+                        generation_id=generation_id,
+                        temp_id=generation_id,  # 关键修复：使用generation_id作为temp_id
+                        message=message,
+                        file_data=file_data,
+                        file_name=file_name,
+                        file_type=file_type,
+                        is_streaming=is_streaming
+                    )
+                )
+            
+            else:
+                logger.warning(f"收到未知的WebSocket消息类型: {message_type}")
             # End of AI processing block
 
         except json.JSONDecodeError as e:
@@ -326,11 +386,24 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def validate_conversation_ownership(self, user):
+        if not self.conversation_id:
+            return True # Allow connection for new conversations
         try:
             Conversation.objects.get(id=self.conversation_id, user=user)
             return True
         except Conversation.DoesNotExist:
             return False
+
+    @database_sync_to_async
+    def create_new_conversation(self, user):
+        """Creates a new conversation for the given user."""
+        try:
+            new_conv = Conversation.objects.create(user=user, title="新对话")
+            logger.info(f"为用户 {user.id} 创建了新的会话 {new_conv.id}")
+            return new_conv
+        except Exception as e:
+            logger.error(f"为用户 {user.id} 创建新会话失败: {e}")
+            return None
 
     @database_sync_to_async
     def save_user_message(self, conversation, message, model_id):
@@ -365,719 +438,23 @@ class ChatConsumer(AsyncWebsocketConsumer):
             import traceback
             logger.error(traceback.format_exc())
             raise
-    async def process_ai_response(self, model_id, user_message_id, generation_id): # Add generation_id param
-        """处理AI回复"""
-        final_status = "unknown" # Initialize status tracker
-        try:
-            # Note: termination_message_sent is reset in receive before calling this
-
-            # 获取会话和模型
-            conversation = await self.get_conversation(self.conversation_id)
-            if not conversation:
-                await self.send(text_data=json.dumps({
-                    'type': 'error',
-                    'message': '会话不存在'
-                }))
-                return
-
-            # 获取用户消息
-            user_message = await self.get_message(user_message_id)
-            if not user_message:
-                await self.send(text_data=json.dumps({
-                    'type': 'error',
-                    'message': '用户消息不存在'
-                }))
-                return
-
-            # 获取模型
-            model = await self.get_model(model_id)
-            if not model:
-                await self.send(text_data=json.dumps({
-                    'type': 'error',
-                    'message': '模型不存在'
-                }))
-                return
-
-            # 获取历史消息
-            history_messages = await self.get_history_messages(
-                conversation['id'], model['max_history_messages']
-            )
-
-            # 构建请求数据
-            messages = []
-            for msg in history_messages:
-                role = "user" if msg['is_user'] else "assistant"
-                messages.append({
-                    "role": role,
-                    "content": msg['content']
-                })
-
-            # 获取API信息
-            api_info = {
-                'url': f"{model['provider_base_url']}/v1/chat/completions",
-                'key': model['provider_api_key'],
-                'model_name': model['model_name'],
-                'params': model['default_params']
-            }
-
-            # 发送请求到AI服务，并添加重试机制
-            response_content = None
-            retry_count = 0
-
-            # 发送请求前通知用户
-            await self.send_status_message('正在生成回复...')
-
-            while response_content is None and retry_count <= AI_REQUEST_MAX_RETRIES and not self.stop_requested:
-                if retry_count > 0:
-                    await self.send_status_message(f'请求超时，正在重试 ({retry_count}/{AI_REQUEST_MAX_RETRIES})...')
-                    # 每次重试前等待一小段时间
-                    await asyncio.sleep(1)
-
-                try:
-                    # --- MODIFIED: Pass generation_id to send_request_to_ai ---
-                    # 创建一个任务并保存引用，以便可以取消它
-                    self.active_request_task = asyncio.create_task(
-                        self.send_request_to_ai(api_info, messages, model, generation_id) # Pass generation_id
-                    )
-                    # --- END MODIFIED ---
-
-                    try:
-                        response_content = await self.active_request_task
-                    finally:
-                        self.active_request_task = None  # 清除任务引用
-
-                except asyncio.CancelledError:
-                    logger.info("AI请求已被取消")
-                    if self.stop_requested:
-                        response_content = "生成已被用户终止。"
-                    raise  # 重新抛出取消异常，让外层捕获
-                except asyncio.TimeoutError as e:
-                    logger.error(f"AI请求超时 (尝试 {retry_count+1}/{AI_REQUEST_MAX_RETRIES+1}): {str(e)}")
-                    retry_count += 1
-                    # 如果已达到最大重试次数，将错误信息作为响应
-                    if retry_count > AI_REQUEST_MAX_RETRIES:
-                        response_content = f"AI服务响应超时，已重试 {AI_REQUEST_MAX_RETRIES} 次。请稍后再试或简化您的请求。"
-                except Exception as e:
-                    logger.error(f"AI请求失败 (尝试 {retry_count+1}/{AI_REQUEST_MAX_RETRIES+1}): {str(e)}")
-                    retry_count += 1
-                    # 如果已达到最大重试次数，将错误信息作为响应
-                    if retry_count > AI_REQUEST_MAX_RETRIES:
-                        response_content = f"AI服务请求失败: {str(e)}"
-
-            logger.debug(f"process_ai_response: Exited AI request loop. stop_requested={self.stop_requested}, response_content type={type(response_content)}") # ADDED LOG
-
-            # 检查是否是因为终止请求而退出循环
-            if self.stop_requested:
-                logger.info("生成已被用户终止 (检查点1 - 循环后)，不保存或发送AI回复") # MODIFIED LOG
-                # 清除状态消息
-                await self.send_status_message('', clear=True)
-                # 发送终止消息给客户端
-                await self.send(text_data=json.dumps({
-                    'type': 'generation_stopped',
-                    'message': '生成已被用户终止'
-                }))
-                # 标记已发送终止消息
-                self.termination_message_sent = True
-                # 重置终止标志
-                self.stop_requested = False
-                return
-
-            # 清除状态消息
-            logger.debug("process_ai_response: Attempting to clear status message.") # ADDED LOG
-            await self.send_status_message('', clear=True)
-            logger.debug("process_ai_response: Status message cleared.") # ADDED LOG
-
-            logger.debug("process_ai_response: Checking if response_content is None.") # ADDED LOG
-            if not response_content:
-                # 所有重试都失败
-                logger.warning("process_ai_response: response_content is None after loop, sending error.") # ADDED LOG
-                await self.send(text_data=json.dumps({
-                    'type': 'error',
-                    'message': '获取AI回复失败，请稍后重试'
-                }))
-                return
-
-            # 检查是否是错误消息
-            logger.debug("process_ai_response: Checking if response_content is an error message.") # ADDED LOG
-            # Add a type check for safety before calling startswith
-            is_error_message = False
-            if isinstance(response_content, str):
-                 # REMOVED: "失败" in response_content check to avoid false positives
-                 is_error_message = response_content.startswith("AI服务") or response_content.startswith("请求被取消")
-            logger.debug(f"process_ai_response: Is error message check result (removed '失败' check): {is_error_message}") # MODIFIED LOG
-
-            if is_error_message:
-                # 发送错误消息
-                logger.warning(f"process_ai_response: Detected error message in response_content: {response_content}") # ADDED LOG
-                await self.send(text_data=json.dumps({
-                    'type': 'error',
-                    'message': response_content
-                }))
-                return
-
-            # 在保存AI回复前再次检查终止标志 (检查点 2 - 本地标志)
-            logger.debug(f"process_ai_response: Checking self.stop_requested before save (Check 2). Value: {self.stop_requested}") # MODIFIED LOG
-            if self.stop_requested:
-                logger.info("在保存AI回复前检测到终止标志 (Check 2)，不保存或发送AI回复") # MODIFIED LOG
-                # 清除状态消息
-                await self.send_status_message('', clear=True)
-                # 发送终止消息给客户端
-                await self.send(text_data=json.dumps({
-                    'type': 'generation_stopped',
-                    'message': '生成已被用户终止'
-                }))
-                # 标记已发送终止消息
-                self.termination_message_sent = True
-                # 重置终止标志
-                self.stop_requested = False
-                return
-
-            # --- MODIFIED: Check global stop state PRECISELY before saving --- (检查点 3 - 全局标志)
-            logger.debug(f"process_ai_response: Checking global stop state before save (Check 3) for GenID: {generation_id}") # MODIFIED LOG
-            stop_state_before_save = None # Initialize
-            try: # Wrap the sync call
-                 stop_state_before_save = get_stop_requested_sync(self.conversation_id)
-                 logger.debug(f"process_ai_response: Global stop state before save (Check 3 result): {stop_state_before_save}") # MODIFIED LOG
-            except Exception as sync_err:
-                 logger.error(f"process_ai_response: Error calling get_stop_requested_sync: {sync_err}")
-                 # Decide how to handle this - maybe treat as no stop? Or raise? For now, log and continue (stop_state_before_save remains None)
-
-            # Compare as strings for safety with UUIDs, handle None case
-            global_stop_requested = stop_state_before_save.get('requested', False) if stop_state_before_save else False
-            global_target_gen_id = str(stop_state_before_save.get('generation_id_to_stop')) if stop_state_before_save.get('generation_id_to_stop') else None
-            current_gen_id_str = str(generation_id)
-
-            logger.debug(f"process_ai_response: Comparing GlobalStopRequested({global_stop_requested}) AND GlobalTargetGenID({global_target_gen_id}) == CurrentGenID({current_gen_id_str})") # ADDED LOG
-
-            if global_stop_requested and global_target_gen_id == current_gen_id_str:
-                logger.warning(f"process_ai_response: 检测到针对此生成 ({generation_id}) 的停止请求 (保存前)，不保存AI回复。StopState: {stop_state_before_save}")
-                # 清除状态消息
-                await self.send_status_message('', clear=True)
-                # 发送终止消息给客户端
-                if not self.termination_message_sent: # 避免重复发送
-                    await self.send(text_data=json.dumps({
-                        'type': 'generation_stopped',
-                        'message': '生成已被用户终止'
-                    }))
-                    self.termination_message_sent = True
-                # 重置状态 (由 generation_stopped 处理程序负责)
-                # set_stop_requested_sync(self.conversation_id, False) # REMOVED - Let handler do it
-                return
-            # --- END MODIFIED CHECK ---
-
-            logger.debug("process_ai_response: Passed all pre-save checks.") # ADDED LOG
-
-            # 保存AI回复
-            logger.info(f"process_ai_response: Preparing to call save_ai_message for GenID: {generation_id}") # Keep this log
-            try: # Keep try/except around save_ai_message
-                ai_message = await self.save_ai_message(
-                    conversation['id'], response_content, model['id']
-                )
-                # ADDED LOG: Check if the call returned *anything* and what type
-                logger.debug(f"process_ai_response: save_ai_message call returned. Result type: {type(ai_message)}, Value: {ai_message}")
-                logger.info(f"process_ai_response: save_ai_message call successful for GenID: {generation_id}, MsgID: {ai_message['id']}") # ADDED LOG
-
-                # --- MOVED & MODIFIED: Set status after successful save ---
-                final_status = "completed" # Mark as completed now that AI responded and saved
-                logger.info(f"process_ai_response: AI response received and saved (MsgID: {ai_message['id']}). Set final_status='completed'.")
-                # --- END MOVED & MODIFIED ---
-
-            except Exception as save_err: # ADDED specific exception handling for save
-                logger.error(f"process_ai_response: Error occurred DURING save_ai_message call for GenID: {generation_id}: {str(save_err)}")
-                import traceback
-                logger.error(traceback.format_exc())
-                final_status = "failed" # Set status if save fails
-                # Optionally re-raise or handle differently, but for now just log and set status
-                # Re-raising would hit the outer except block below. Let's keep it contained for now.
-                # We will skip sending the message if save fails.
-
-            # --- FINAL PRE-SEND CHECK (Moved Here, No Lock Needed for Sending) ---
-            # Only proceed if save was successful (final_status is 'completed')
-            if final_status == "completed":
-                stop_state_final_check = get_stop_requested_sync(self.conversation_id)
-                local_stop_flag_final_check = self.stop_requested # 检查本地标志
-                global_stop_matches_this_gen_final_check = (
-                    stop_state_final_check.get('requested') and
-                    str(stop_state_final_check.get('generation_id_to_stop')) == str(generation_id)
-                )
-                # Removed duplicated block
-
-                # Final check before sending the saved message
-                if global_stop_matches_this_gen_final_check or local_stop_flag_final_check:
-                    # Stop condition detected *after* saving but *before* sending
-                    reason = []
-                    if global_stop_matches_this_gen_final_check:
-                        reason.append(f"全局状态停止 (匹配 GenID: {generation_id})")
-                    if local_stop_flag_final_check:
-                        reason.append("本地标志为True")
-
-                    final_status = "cancelled" # Update status
-                    logger.warning(f"process_ai_response: FINAL PRE-SEND CHECK detected stop condition ({', '.join(reason)}) for conversation {self.conversation_id}. Deleting message {ai_message['id']}, setting status to '{final_status}' and NOT sending.")
-
-                    # Delete the message that was just saved
-                    deleted = await self.delete_ai_message(ai_message['id'])
-                    if deleted:
-                        logger.info(f"已删除终止后的AI回复消息 ID: {ai_message['id']} (pre-send check)")
-                    else:
-                        logger.warning(f"尝试删除终止后的AI回复消息失败或未找到 ID: {ai_message['id']} (pre-send check)")
-                    return # Exit, finally block will send 'cancelled' status
-                else:
-                    # Stop condition NOT detected, proceed to send the message
-                    logger.info(f"process_ai_response: Sending AI message {ai_message['id']} for conversation {self.conversation_id} (passed final pre-send check)")
-                    try:
-                        await self.channel_layer.group_send(
-                            self.conversation_group_name,
-                        {
-                            'type': 'chat_message',
-                            'message': response_content,
-                            'is_user': False,
-                            'message_id': ai_message['id'],
-                            'timestamp': ai_message['timestamp'].isoformat(), # Use ISO format
-                            'generation_id': generation_id
-                        }
-                    )
-                    # Correctly indent the except block to match the try block inside the else
-                    except Exception as group_send_err:
-                        logger.error(f"Error during group_send for message {ai_message['id']}: {group_send_err}")
-                        # Keep final_status as "completed" since generation succeeded, error is in delivery
-            # --- End of the `if final_status == "completed":` block ---
-        # Outer exception handlers for the main process_ai_response try block
-        except asyncio.CancelledError:
-            logger.info(f"process_ai_response: Caught asyncio.CancelledError for GenID: {generation_id}") # ADDED LOG
-            final_status = "cancelled" # Set status to cancelled
-            # --- MODIFIED: Reset state logic in CancelledError handler ---
-            # No longer reset global state here, finally block handles it.
-            # Just clear local state and DB ID.
-            # --- END MODIFIED ---
-            # --- ADDED: Clear DB generation ID on cancellation ---
-            await self.clear_db_generation_id(self.conversation_id, generation_id)
-            # --- END ADDED ---
-            self.current_generation_id = None # Clear local generation ID on cancellation
-            # 发送终止消息 (如果尚未发送)
-            if not self.termination_message_sent:
-                 await self.send(text_data=json.dumps({
-                     'type': 'generation_stopped',
-                     'message': '生成已终止'
-                 }))
-                 self.termination_message_sent = True # Mark as sent
-
-        except Exception as e:
-            logger.error(f"process_ai_response: Caught OUTER Exception for GenID: {generation_id}: {str(e)}") # ADDED LOG + Context
-            import traceback # Ensure traceback is imported here too
-            logger.error(traceback.format_exc()) # Log traceback for outer exception
-            final_status = "failed" # Set status to failed
-            # --- ADDED: Clear DB generation ID on general exception ---
-            await self.clear_db_generation_id(self.conversation_id, generation_id)
-            # --- END ADDED ---
-            self.current_generation_id = None # Clear local generation ID on error
-
-            # --- MODIFIED: Send user-friendly error message ---
-            user_friendly_error = "与AI服务通信时发生未知错误，请稍后重试。"
-            error_str = str(e)
-            if isinstance(e, asyncio.TimeoutError) or "TimeoutError" in error_str:
-                user_friendly_error = "AI服务响应超时，请稍后再试或简化您的请求。"
-            elif "AI服务响应错误" in error_str: # Catch specific API errors
-                 user_friendly_error = "AI服务返回错误，请检查您的API密钥或稍后重试。"
-            elif "未能从AI服务响应中提取有效内容" in error_str:
-                 user_friendly_error = "AI服务返回了无法理解的响应，请稍后重试。"
-
-            await self.send(text_data=json.dumps({
-                'type': 'error',
-                'message': user_friendly_error # Send user-friendly message
-            }))
-            # --- END MODIFIED ---
-        finally:
-            # --- ADDED: Cleanup in finally block ---
-            logger.debug(f"process_ai_response finally block executing for GenID: {generation_id}, ConvID: {self.conversation_id}")
-            # 1. Clear DB generation ID if it matches
-            await self.clear_db_generation_id(self.conversation_id, generation_id)
-
-            # --- REMOVED: Reset global stop state from finally block (Confirmed) ---
-            # RATIONALE: Resetting the global state here creates a race condition.
-            # Redis TTL or explicit clearing upon successful stop confirmation is preferred.
-            # --- END REMOVED ---
-
-            # --- MODIFIED: Send generation_end signal using final_status ---
-            if final_status == "unknown":
-                logger.warning(f"process_ai_response finally: Final status is 'unknown' for GenID {generation_id}. Sending 'failed'.")
-                final_status = "failed" # Default to failed if status wasn't set
-
-            await self.send(text_data=json.dumps({
-                'type': 'generation_end',
-                'generation_id': generation_id,
-                'status': final_status # Use the determined status
-            }))
-            logger.info(f"Sent generation_end signal for GenID: {generation_id}, Status: {final_status}")
-            # --- END MODIFIED ---
-
-    async def chat_message_update(self, event):
-        """处理消息更新，用于流式响应"""
-        content = event['content']
-
-        # 发送增量更新到WebSocket
-        await self.send(text_data=json.dumps({
-            'update': True,
-            'content': content
-        }))
-
-    @database_sync_to_async
-    def get_conversation(self, conversation_id):
-        """获取会话对象"""
-        try:
-            conversation = Conversation.objects.get(id=conversation_id)
-            # 返回一个字典而不是数据库对象
-            return {
-                'id': conversation.id,
-                'title': conversation.title,
-                'user_id': conversation.user_id,
-                'selected_model_id': conversation.selected_model_id if conversation.selected_model else None
-            }
-        except Conversation.DoesNotExist:
-            logger.error(f"会话不存在: {conversation_id}")
-            return None
-        except Exception as e:
-            logger.error(f"获取会话失败: {str(e)}")
-            raise
-
-    @database_sync_to_async
-    def get_message(self, message_id):
-        """获取消息对象"""
-        try:
-            message = Message.objects.get(id=message_id)
-            # 返回一个字典而不是数据库对象，避免在异步环境中访问数据库对象属性的问题
-            return {
-                'id': message.id,
-                'content': message.content,
-                'is_user': message.is_user,
-                'conversation_id': message.conversation_id,
-                'model_used_id': message.model_used_id if message.model_used else None
-            }
-        except Message.DoesNotExist:
-            logger.error(f"消息不存在: {message_id}")
-            return None
-        except Exception as e:
-            logger.error(f"获取消息失败: {str(e)}")
-            raise
-
-    @database_sync_to_async
-    def get_model(self, model_id):
-        """获取模型对象"""
-        try:
-            model = AIModel.objects.get(id=model_id)
-            # 返回一个字典而不是数据库对象
-            provider = model.provider
-            return {
-                'id': model.id,
-                'model_name': model.model_name,
-                'display_name': model.display_name,
-                'max_history_messages': model.max_history_messages,
-                'default_params': model.default_params,
-                'provider_id': provider.id if provider else None,
-                'provider_base_url': provider.base_url if provider else None,
-                'provider_api_key': provider.api_key if provider else None
-            }
-        except AIModel.DoesNotExist:
-            logger.error(f"模型不存在: {model_id}")
-            return None
-        except Exception as e:
-            logger.error(f"获取模型失败: {str(e)}")
-            raise
-
-    @database_sync_to_async
-    def get_api_info(self, model):
-        """获取API信息"""
-        try:
-            provider = model.provider
-            api_url = f"{provider.base_url}/v1/chat/completions"
-            api_key = provider.api_key
-
-            return {
-                'url': api_url,
-                'key': api_key,
-                'model_name': model.model_name,
-                'params': model.default_params
-            }
-        except Exception as e:
-            logger.error(f"获取API信息失败: {str(e)}")
-            raise
-
-    @database_sync_to_async
-    def get_history_messages(self, conversation_id, max_messages):
-        """获取历史消息"""
-        try:
-            messages = Message.objects.filter(conversation_id=conversation_id).order_by('timestamp')
-
-            # 如果消息数量超过限制，只返回最近的消息
-            if messages.count() > max_messages:
-                messages = messages[messages.count() - max_messages:]
-
-            return [
-                {
-                    'id': msg.id,
-                    'content': msg.content,
-                    'is_user': msg.is_user,
-                    'timestamp': msg.timestamp
-                } for msg in messages
-            ]
-        except Exception as e:
-            logger.error(f"获取历史消息失败: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return []
-
-    @database_sync_to_async
-    def save_ai_message(self, conversation_id, content, model_id):
-        """保存AI回复消息"""
-        logger.debug(f"save_ai_message: Attempting to save AI message for conversation {conversation_id}") # ADDED LOG
-        try:
-            logger.debug(f"save_ai_message: Getting conversation {conversation_id}") # ADDED LOG
-            conversation = Conversation.objects.get(id=conversation_id)
-            logger.debug(f"save_ai_message: Getting model {model_id}") # ADDED LOG
-            model = AIModel.objects.get(id=model_id)
-
-            logger.debug(f"save_ai_message: Creating Message object for conversation {conversation_id}") # ADDED LOG
-            ai_message = Message.objects.create(
-                conversation=conversation,
-                content=content,
-                is_user=False,
-                model_used=model
-            )
-
-            # 更新会话时间
-            logger.debug(f"save_ai_message: Message created with ID {ai_message.id}. Updating conversation timestamp.") # ADDED LOG
-            conversation.save()  # 自动更新updated_at字段
-            logger.debug(f"save_ai_message: Conversation timestamp updated for {conversation_id}") # ADDED LOG
-
-            return {
-                'id': ai_message.id,
-                'content': ai_message.content,
-                'timestamp': ai_message.timestamp
-            }
-        except Exception as e:
-            logger.error(f"save_ai_message: Error saving AI message for conversation {conversation_id}: {str(e)}") # ADDED LOG Context
-            import traceback # Ensure traceback is imported here
-            logger.error(traceback.format_exc()) # Log full traceback
-            raise # Re-raise the exception
-
-    @database_sync_to_async
-    def delete_ai_message(self, message_id):
-        """删除AI回复消息"""
-        try:
-            # 尝试删除消息
-            message = Message.objects.filter(id=message_id).first()
-            if message:
-                logger.info(f"删除消息ID: {message_id}")
-                message.delete()
-                return True
-            else:
-                logger.warning(f"要删除的消息不存在，ID: {message_id}")
-                return False
-        except Exception as e:
-            logger.error(f"删除消息失败，ID: {message_id}, 错误: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return False
-
-    async def chat_message_id_update(self, event):
-        """处理消息ID更新，用于将临时ID替换为实际ID"""
-        message_id = event['message_id']
-        temp_id = event.get('temp_id', '')
-        user_message_id = event.get('user_message_id', '')
-
-        # 发送消息ID更新到WebSocket
-        await self.send(text_data=json.dumps({
-            'id_update': True,
-            'message_id': message_id,
-            'temp_id': temp_id,
-            'user_message_id': user_message_id
-        }))
-
-    # --- MODIFIED: Add generation_id parameter and Redis checks ---
-    async def send_request_to_ai(self, api_info, messages, model, generation_id):
-        """发送请求到AI服务，并在关键点检查Redis停止标志"""
-        try:
-            # --- ADDED: Initial Redis Stop Check ---
-            stop_state_initial = get_stop_requested_sync(self.conversation_id)
-            if stop_state_initial.get('requested') and str(stop_state_initial.get('generation_id_to_stop')) == str(generation_id):
-                logger.warning(f"send_request_to_ai: 检测到针对此生成 ({generation_id}) 的停止请求 (请求开始前)，取消发送。StopState: {stop_state_initial}")
-                raise asyncio.CancelledError("后台请求停止 (Initial Check)")
-            # --- END ADDED ---
-
-            # 检查本地标志 (Keep local check as well)
-            if self.stop_requested:
-                logger.info("检测到本地终止标志，取消发送AI请求")
-                raise asyncio.CancelledError("用户请求终止生成 (Local Check)")
-
-            # 构建请求数据
-            request_data = {
-                "model": api_info['model_name'],
-                "messages": messages,
-                "stream": False,  # 使用非流式响应
-                **api_info['params']
-            }
-
-            # 使用aiohttp发送异步请求
-            async with aiohttp.ClientSession() as session:
-                # 创建一个可取消的任务
-                try:
-                    async with session.post(
-                        api_info['url'],
-                        json=request_data,
-                        headers={
-                            "Content-Type": "application/json",
-                            "Authorization": f"Bearer {api_info['key']}"
-                        },
-                        timeout=aiohttp.ClientTimeout(total=AI_REQUEST_TIMEOUT)  # 使用AI_REQUEST_TIMEOUT
-                    ) as response:
-                        # 处理响应
-                        if response.status == 200:
-                            # --- ADDED: Redis Stop Check After Receiving Response Header ---
-                            stop_state_after_response = get_stop_requested_sync(self.conversation_id)
-                            if stop_state_after_response.get('requested') and str(stop_state_after_response.get('generation_id_to_stop')) == str(generation_id):
-                                logger.warning(f"send_request_to_ai: 检测到针对此生成 ({generation_id}) 的停止请求 (收到响应后)，丢弃响应。StopState: {stop_state_after_response}")
-                                raise asyncio.CancelledError("后台请求停止 (After Response Check)")
-                            # --- END ADDED ---
-
-                            # 检查本地标志 (Keep local check)
-                            if self.stop_requested:
-                                logger.info("收到AI响应，但检测到本地终止标志，丢弃响应")
-                                raise asyncio.CancelledError("用户请求终止生成 (Local Check After Response)")
-
-                            # --- REFACTORED: Use response_handlers module ---
-                            try:
-                                extracted_content = await extract_response_content(response)
-                                return extracted_content
-                            except ResponseExtractionError as extract_err:
-                                # Log the specific extraction error and raise a generic Exception
-                                # for the retry mechanism in process_ai_response
-                                logger.error(f"内容提取失败: {extract_err}")
-                                raise Exception(f"未能从AI服务响应中提取有效内容: {extract_err}") from extract_err
-                            # --- END REFACTORED ---
-
-                        # Handle non-200 responses
-                        elif response.status != 200:
-                             response_text = await response.text()
-                             error_msg = f"AI服务响应错误: {response.status} - {response_text}"
-                             logger.error(error_msg)
-                             # 抛出异常以便重试
-                             raise Exception(error_msg)
-                except asyncio.CancelledError:
-                    logger.info("AI请求被取消")
-                    raise  # 重新抛出取消异常
-        except asyncio.TimeoutError as e:
-            logger.error(f"发送请求到AI服务超时: {str(e)}")
-            # 直接抛出超时异常，让调用者处理重试
-            raise
-        except asyncio.CancelledError:
-            logger.info("AI请求被取消")
-            raise  # 重新抛出取消异常
-        except Exception as e:
-            # Catch other exceptions including the one raised from ResponseExtractionError
-            logger.error(f"发送请求到AI服务或处理响应时失败: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-
-            # 针对特定错误类型提供更具体的错误信息
-            error_message = str(e)
-            if isinstance(e, asyncio.TimeoutError) or "TimeoutError" in error_message:
-                error_msg = "AI服务响应超时，这可能是因为模型生成内容需要更长时间。请稍后再试或考虑简化您的请求。"
-                raise asyncio.TimeoutError(error_msg) from e
-            elif isinstance(e, asyncio.CancelledError) or "CancelledError" in error_message:
-                 error_msg = "请求被取消，可能是因为连接中断或用户请求终止。"
-                 raise asyncio.CancelledError(error_msg) from e
-            elif isinstance(e.__cause__, ResponseExtractionError): # Check if the cause was our custom error
-                # Use the message from the ResponseExtractionError if available
-                error_msg = f"处理AI服务响应时出错: {e.__cause__}"
-                raise Exception(error_msg) from e # Raise generic Exception for retry
-            else:
-                error_msg = "与AI服务通信或处理响应时发生错误，请稍后重试。"
-                raise Exception(error_msg) from e
-
-    async def send_status_message(self, message, clear=False):
-        """发送状态消息到WebSocket"""
-        await self.send(text_data=json.dumps({
-            'type': 'clear_status' if clear else 'status',
-            'message': message
-        }))
-
-    async def generation_stopped(self, event):
-        """处理生成终止消息"""
-        message = event.get('message', '生成已终止')
-        logger.info(f"收到终止生成消息: {message} (会话: {self.conversation_id})")
-
-        # REMOVED: 不再检查 self.termination_message_sent。处理器必须运行以重置全局标志。
-        # if self.termination_message_sent:
-        #     logger.info(f"会话 {self.conversation_id} 已经发送过终止消息，不再重复发送")
-        #     return
-
-        # 标记此实例已处理/发送终止消息 (如果需要避免重复发送给 *此* 客户端)
-        # 注意：这不应阻止全局标志重置
-        if not self.termination_message_sent:
-             self.termination_message_sent = True
-        else:
-             logger.info(f"会话 {self.conversation_id} 此 consumer 实例之前已发送终止消息，但仍将继续处理以重置全局标志。")
-
-        # REMOVED: 不再在此处设置全局标志，stop_generation_api 或 receive 方法已经设置
-
-        # 获取锁，确保终止请求能够立即生效
-        async with self.response_lock:
-            # 如果有活跃的请求任务，取消它
-            if self.active_request_task:
-                logger.info("正在取消活跃的AI请求任务")
-                self.active_request_task.cancel()
-                self.active_request_task = None
-
-            # 设置本地终止标志
-            self.stop_requested = True
-            logger.info(f"Consumer generation_stopped: Set local self.stop_requested = True for {self.conversation_id}")
-
-        # 清除状态消息
-        await self.send_status_message('', clear=True)
-
-        # 删除可能存在的未完成回复 (Keep this logic)
-        try:
-            # 获取会话信息
-            conversation = await self.get_conversation(self.conversation_id)
-            if conversation:
-                # 获取最后一条用户消息
-                user_messages = await self.get_last_user_message(conversation['id'])
-                if user_messages:
-                    # 删除该用户消息之后的所有AI回复
-                    await self.delete_subsequent_ai_messages(conversation['id'], user_messages['timestamp'])
-                    logger.info(f"已删除会话 {self.conversation_id} 中最后一条用户消息后的所有AI回复")
-        except Exception as e:
-            logger.error(f"尝试删除未完成回复时出错: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-
-        # 发送终止消息到客户端
-        await self.send(text_data=json.dumps({
-            'type': 'generation_stopped',
-            'message': message
-         }))
-
-        # --- REMOVED: Reset global stop state here ---
-        # RATIONALE: Resetting the global state manually here is prone to race conditions.
-        # Relying on Redis TTL or explicit clearing only when a task *successfully* stops is safer.
-        # try:
-        #     set_stop_requested_sync(self.conversation_id, False) # Clear requested flag and generation_id_to_stop
-        #     logger.info(f"generation_stopped: Reset global stop state for conversation {self.conversation_id} after confirming stop.")
-        # except Exception as stop_reset_err:
-        #     logger.error(f"generation_stopped: Error resetting global stop state for conversation {self.conversation_id}: {stop_reset_err}")
-        # --- END REMOVED ---
-
-        # --- REMOVED: Old rationale comment --- (Still valid, but code removed above)
-        # RATIONALE: Resetting the global state here is incorrect because this handler
-        # executes immediately upon receiving the stop *request*, before the targeted
-        # generation process (potentially running in the API view) has actually finished.
-        # Resetting too early creates race conditions where subsequent, unrelated generations
-        # might be incorrectly blocked, or the intended stop might not be properly acknowledged
-        # by the time the target generation finishes.
-        # The CORRECT approach is for the process *responsible* for the generation
-        # identified by 'generation_id_to_stop' to reset the state in its *finally* block,
-        # *only if* the global state indicates it was the one targeted for stopping.
-        # This logic will be added to the API view and process_ai_response later.
-        # --- END REMOVED ---
+    async def broadcast_event(self, event_data):
+        """
+        接收来自 channel layer 的事件并将其广播到客户端。
+        'event_data' 的格式为: {'event': {'type': '...', 'data': {...}}}
+        """
+        # 直接将 'event' 字典发送给客户端
+        await self.send(text_data=json.dumps(event_data['event']))
+
+    async def send_error(self, message):
+        """向客户端发送格式化的错误消息"""
+        await self.send(text_data=json.dumps({'type': 'error', 'message': message}))
+
+    # DEPRECATED: The 'generation_stopped' event is no longer used.
+    # The 'generation_end' event with a 'stopped' status provides more precise control.
+    # async def generation_stopped(self, event):
+    #     """处理生成终止消息"""
+    #     pass
 
     @database_sync_to_async
     def get_last_user_message(self, conversation_id):
@@ -1185,24 +562,75 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         # Forward the start signal to the client, including the generation_id and temp_id
         await self.send(text_data=json.dumps({
-            'type': 'generation_started', # Use a distinct type for client-side handling
-            'generation_id': generation_id,
-            'temp_id': temp_id # Pass the original temp_id/user_message_id back
+            'type': 'generation_start',
+            'data': {
+                'generation_id': generation_id,
+                'temp_id': temp_id
+            }
         }))
-        logger.info(f"Consumer {self.channel_name}: Forwarded 'generation_started' to client for GenID {generation_id}")
+        logger.info(f"Consumer {self.channel_name}: Forwarded 'generation_start' to client for GenID {generation_id}")
     # --- END: Handle generation_start ---
 
-    # --- ADDED: Handler for generation_end signal --- (Moved to class level)
-    async def generation_end(self, event):
-        """Handles the generation_end signal from the backend (API view or task)."""
-        generation_id = event.get('generation_id')
-        status = event.get('status', 'unknown') # completed, failed, cancelled
-        logger.info(f"Consumer received generation_end signal for GenID: {generation_id}, Status: {status}")
+    async def handle_image_upload_async(self, conversation_id, model_id, user_message_id, generation_id, temp_id, message, file_data, file_name, file_type, is_streaming):
+        """处理图片上传的异步方法"""
+        import base64
+        import tempfile
+        import os
+        from .services import generate_ai_response_with_image
+        
+        try:
+            logger.info(f"开始处理图片上传: ConvID={conversation_id}, GenID={generation_id}")
+            
+            # 解码Base64文件数据
+            try:
+                file_content = base64.b64decode(file_data)
+            except Exception as e:
+                logger.error(f"解码Base64文件数据失败: {e}")
+                await self.send_error("文件数据格式错误")
+                return
+            
+            # 创建临时文件
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_type.split('/')[-1]}") as temp_file:
+                temp_file.write(file_content)
+                temp_file_path = temp_file.name
+            
+            try:
+                # 调用图片处理服务
+                await generate_ai_response_with_image(
+                    conversation_id=conversation_id,
+                    model_id=model_id,
+                    user_message_id=user_message_id,
+                    generation_id=generation_id,
+                    temp_id=temp_id,
+                    message=message,
+                    image_path=temp_file_path,
+                    is_streaming=is_streaming
+                )
+            finally:
+                # 清理临时文件
+                try:
+                    os.unlink(temp_file_path)
+                except Exception as e:
+                    logger.warning(f"清理临时文件失败: {e}")
+                    
+        except Exception as e:
+            logger.error(f"处理图片上传时出错: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            await self.send_error(f"图片处理失败: {str(e)}")
 
-        # Forward the signal to the client WebSocket
-        await self.send(text_data=json.dumps({
-            'type': 'generation_end',
-            'generation_id': generation_id,
-            'status': status
-        }))
-    # --- END ADDED ---
+    @database_sync_to_async
+    def delete_ai_message(self, message_id):
+        """删除AI消息"""
+        try:
+            message = Message.objects.filter(id=message_id, is_user=False).first()
+            if message:
+                message.delete()
+                logger.info(f"已删除AI消息 ID: {message_id}")
+                return True
+            else:
+                logger.warning(f"未找到要删除的AI消息 ID: {message_id}")
+                return False
+        except Exception as e:
+            logger.error(f"删除AI消息失败: {e}")
+            return False

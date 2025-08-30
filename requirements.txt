@@ -15,5 +15,11 @@ channels-redis>=4.1.0
 whitenoise>=6.5.0
 gunicorn>=21.2.0
 uvicorn>=0.24.0
-aiohttp>=3.9.0
+aiohttp==3.9.5
+aiosignal==1.3.1
+async-timeout==4.0.3
+attrs==23.2.0
+frozenlist==1.4.1
+multidict==6.0.5
+yarl==1.9.4
 redis>=4.6.0

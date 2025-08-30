@@ -18,7 +18,8 @@
         {% if is_admin %}
         <div>
             <button id="add-provider-btn" class="btn btn-primary me-2">添加新服务提供商</button>
-            <button id="add-model-btn" class="btn btn-success">添加新AI模型</button>
+            <button id="add-model-btn" class="btn btn-success me-2">添加新AI模型</button>
+            <button id="fetch-models-btn" class="btn btn-info">从API获取模型</button>
         </div>
         {% endif %}
     </div>
@@ -232,6 +233,72 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
                 <button type="button" class="btn btn-primary" id="save-provider-btn">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="fetchModelsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">从API获取模型</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label for="fetch-provider-select" class="form-label">选择服务提供商</label>
+                    <select class="form-select" id="fetch-provider-select" required>
+                        <option value="" selected disabled>请选择服务提供商</option>
+                        {% for provider in providers %}
+                        <option value="{{ provider.id }}">{{ provider.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                
+                <div id="fetch-models-loading" class="text-center d-none">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">加载中...</span>
+                    </div>
+                    <p class="mt-2">正在从API获取模型列表...</p>
+                </div>
+                
+                <div id="fetch-models-error" class="alert alert-danger d-none">
+                    <p id="fetch-models-error-message"></p>
+                </div>
+                
+                <div id="fetch-models-table-container" class="d-none">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h6>可用模型列表</h6>
+                        <div>
+                            <button id="select-all-models-btn" class="btn btn-sm btn-outline-primary me-2">全选</button>
+                            <button id="deselect-all-models-btn" class="btn btn-sm btn-outline-secondary">取消全选</button>
+                        </div>
+                    </div>
+                    
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th style="width: 50px;"><input type="checkbox" id="select-all-checkbox"></th>
+                                    <th>模型ID/名称</th>
+                                    <th>显示名称（可编辑）</th>
+                                    <th>最大上下文长度</th>
+                                    <th>最大历史消息数</th>
+                                    <th>状态</th>
+                                </tr>
+                            </thead>
+                            <tbody id="fetch-models-table-body">
+                                <!-- 模型列表将通过JS加载 -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="fetch-models-submit-btn">获取模型列表</button>
+                <button type="button" class="btn btn-success d-none" id="add-selected-models-btn">添加所选模型</button>
             </div>
         </div>
     </div>
