@@ -16,7 +16,7 @@ from chat.models import AIProvider, AIModel
 from chat.utils import ensure_valid_api_url # Import from local utils
 from .decorators import admin_required # Import from local decorators
 from users.models import UserProfile # Assuming UserProfile is in users.models
-from .api import is_user_admin  # 导入辅助函数
+from .api import is_user_admin
 
 logger = logging.getLogger(__name__)
 
@@ -27,18 +27,7 @@ logger = logging.getLogger(__name__)
 @require_http_methods(["GET", "POST", "PUT", "DELETE"])
 def get_models_api(request):
     """获取和管理AI模型 (管理员可管理，普通用户可查看活跃模型)"""
-    # 检查用户是否为管理员
-    is_admin = False
-    if request.user.is_authenticated:
-        try:
-            profile = request.user.profile
-            is_admin = profile.is_admin
-        except UserProfile.DoesNotExist:
-            # Profile might not exist yet for a user
-            is_admin = False
-        except AttributeError:
-             # Handle cases where 'profile' might not be directly accessible
-             is_admin = False
+    is_admin = is_user_admin(request.user)
 
 
     if request.method == 'GET':
