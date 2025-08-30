@@ -32,6 +32,6 @@
 {% else %}
     <div class="text-center p-3">
         <p>没有对话记录</p>
-        <a href="{% url 'chat-main' %}?no_new=0" id="new-conversation-btn" class="btn btn-sm btn-primary">创建新对话</a>
+        <a href="{% url 'chat-main' %}?no_new=0" class="btn btn-sm btn-primary new-conversation-btn">创建新对话</a>
     </div>
 {% endif %}
