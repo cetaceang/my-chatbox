@@ -22,7 +22,7 @@
 - **响应式界面**：自动适配桌面和移动设备，随时随地轻松使用。
 - **清晰历史记录**：永久保存并清晰展示所有AI对话记录。
 - **跨平台兼容**：支持 Windows 和 Ubuntu 等主流操作系统。
-- **一键启动部署**：提供自动化脚本 (`install_dependencies.py`, `start.py`)，简化环境配置和应用启动流程。
+- **一键启动部署**：提供自动化脚本 (`install_dependencies.py` 和 `start.py`)，简化环境配置和应用启动流程。
 - **成熟可扩展架构**：基于 Django 框架，结构清晰，易于维护和二次开发；集成 Django REST framework，提供 API 接口。
 - **开放源代码**：采用 MIT 许可证，自由使用和修改。
 
@@ -371,7 +371,6 @@ my_chatbox/
 ├── manage.py              # Django 管理脚本
 ├── README.md
 ├── requirements.txt       # 项目依赖列表
-├── run_*.py               # 各种运行脚本 (Windows/Ubuntu/Server)
 ├── start.py               # 统一启动脚本
 └── db.sqlite3             # SQLite 数据库 (默认)
 ```

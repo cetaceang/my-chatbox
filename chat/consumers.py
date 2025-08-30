@@ -16,7 +16,7 @@ import logging
 
 from .models import Conversation, Message, AIModel
 # --- Import new state utils ---
-from .state_utils import get_stop_requested_sync, set_stop_requested_sync, clear_stop_request_state_sync
+from .state_utils import get_stop_requested_sync, set_stop_requested_sync, clear_stop_request_sync, touch_stop_request_sync
 # --- Import response handlers ---
 from .response_handlers import extract_response_content, ResponseExtractionError
 from .services import generate_ai_response, generate_ai_response_with_image # 导入新的服务函数
@@ -73,12 +73,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # 添加一个锁，用于同步终止请求和发送回复
         self.response_lock = asyncio.Lock()
 
-        # 初始化/清除全局终止状态 (使用新的同步函数)
-        if self.conversation_id:
-            set_stop_requested_sync(self.conversation_id, False)
-            logger.info(f"Consumer connected for existing conversation {self.conversation_id}, ensured stop state is False.")
-        else:
-            logger.info(f"Consumer connected for a new conversation.")
+        # 连接时无需进行状态清理
+        logger.info(f"Consumer connected for conversation {self.conversation_id or 'new'}.")
 
     async def disconnect(self, close_code):
         # 检查属性是否存在，如果存在才离开对话组
@@ -93,12 +89,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
             self.active_request_task.cancel()
             self.active_request_task = None
 
-        # 清理全局终止状态 (使用新的同步函数)
-        # No need for await
-        # 同样，只在 conversation_id 存在时才清理
-        if hasattr(self, 'conversation_id') and self.conversation_id:
-            clear_stop_request_state_sync(self.conversation_id)
-            logger.info(f"Consumer disconnected, cleared stop state for {self.conversation_id}")
+        # 断开连接时，状态由TTL自动管理，无需手动清理
+        logger.info(f"Consumer disconnected for conversation {self.conversation_id or 'new'}.")
 
     async def receive(self, text_data):
         """
@@ -109,30 +101,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
             # --- Handle Stop Generation Request ---
             if text_data_json.get('type') == 'stop_generation':
-                logger.info(f"收到终止生成请求 (来自WebSocket): 会话ID {self.conversation_id}")
-                self.stop_requested = True
-                logger.info(f"Consumer.receive: Set local self.stop_requested = True for {self.conversation_id}")
                 generation_id_to_stop = text_data_json.get('generation_id')
                 logger.info(f"收到终止生成请求 (来自WebSocket): 会话ID {self.conversation_id}, 目标 GenID: {generation_id_to_stop}")
 
-                # --- MODIFIED: Add TTL when setting stop state ---
-                stop_ttl = 60 # Set TTL to 60 seconds
-                if not generation_id_to_stop:
-                    logger.warning(f"Consumer.receive: Stop request for conversation {self.conversation_id} did not include 'generation_id'. Attempting to fetch from DB.")
-                    generation_id_to_stop = await self.get_current_generation_id(self.conversation_id)
-                    if generation_id_to_stop:
-                        logger.info(f"Consumer.receive: Fetched active generation ID from DB: {generation_id_to_stop}")
-                    else:
-                        logger.error(f"Consumer.receive: Could not find an active generation_id in the database for conversation {self.conversation_id}. Cannot target stop request.")
-
                 if generation_id_to_stop:
-                    logger.info(f"Consumer.receive: Requesting stop for conversation {self.conversation_id}, targeting generation ID {generation_id_to_stop}. Setting Redis flag with TTL={stop_ttl}s.")
-                    set_stop_requested_sync(self.conversation_id, True, generation_id_to_stop=str(generation_id_to_stop), ttl=stop_ttl)
+                    # 设置初始的停止信号，后续由 aiserivce 的心跳机制来维持
+                    set_stop_requested_sync(generation_id_to_stop)
                 else:
-                    # Fallback if we still don't have an ID
-                    logger.error(f"Consumer.receive: No generation_id available. Setting a general (non-targeted) stop flag for conversation {self.conversation_id} with TTL={stop_ttl}s.")
-                    set_stop_requested_sync(self.conversation_id, True, ttl=stop_ttl)
-                # --- END MODIFIED ---
+                    logger.warning(f"停止请求缺少 'generation_id'，无法处理。")
 
                 async with self.response_lock:
                     if self.active_request_task:
@@ -307,74 +283,23 @@ class ChatConsumer(AsyncWebsocketConsumer):
         message_id = event.get('message_id', '')
         event_generation_id = event.get('generation_id') # Get generation ID from event
 
-        # 如果是AI回复（非用户消息），进行检查
+        # 如果是AI回复（非用户消息），进行最终的发送前检查
         if not is_user:
-            # --- MODIFIED: Use new sync function (no await needed) ---
-            global_stop_state = get_stop_requested_sync(self.conversation_id) # Renamed variable for clarity
-            # --- END MODIFIED ---
-            # REMOVED: local_stop_flag check
-            # REMOVED: Generation ID mismatch check - Consumer's current_generation_id is not relevant for API-pushed messages.
-            # generation_id_mismatch = (event_generation_id != self.current_generation_id)
+            # 使用新的、以 generation_id 为中心的检查
+            if get_stop_requested_sync(event_generation_id):
+                logger.warning(f"chat_message: 检测到针对 GenID {event_generation_id} 的停止请求。在发送到前端前拦截消息 (MsgID: {message_id})。")
+                # 消息已经保存在数据库中，但我们阻止它被发送到前端
+                return  # 停止处理，不发送消息
 
-            # Log the state *before* the check
-            logger.info(f"chat_message CHECK (AI Message): ConvID={self.conversation_id}, MsgID={message_id}, EventGenID={event_generation_id}, ConsumerCurrentGenID={self.current_generation_id}, GlobalStopState={global_stop_state}") # Renamed log field
-
-            # --- REVISED STOP CHECK ---
-            # Check Redis state *at the moment the message is about to be sent*.
-            stop_state = get_stop_requested_sync(self.conversation_id)
-            event_gen_id_str = str(event_generation_id) if event_generation_id else None
-            stop_requested = stop_state.get('requested', False)
-            # Ensure target_gen_id is treated as string for comparison, even if it's None initially
-            target_gen_id = stop_state.get('generation_id_to_stop')
-            target_gen_id_str = str(target_gen_id) if target_gen_id else None
-
-            logger.info(f"chat_message CHECK (AI Message): ConvID={self.conversation_id}, MsgID={message_id}, EventGenID={event_gen_id_str}, StopState={stop_state}")
-
-            # Block if stop is requested AND (it's a general stop OR it targets this specific generation)
-            # Use string comparison for target_gen_id_str
-            should_block = stop_requested and (target_gen_id_str is None or target_gen_id_str == event_gen_id_str)
-
-            if should_block:
-                reason = f"全局状态请求停止 (目标GenID: {target_gen_id_str})" if target_gen_id_str else "全局状态请求通用停止"
-                logger.warning(f"chat_message: 检测到停止条件 ({reason})，不发送会话 {self.conversation_id} 的AI回复 (MsgID: {message_id}, EventGenID: {event_gen_id_str})")
-
-                # 如果消息ID存在，尝试删除该消息
-                if message_id:
-                    deleted = await self.delete_ai_message(message_id)
-                    if deleted:
-                        logger.info(f"已删除终止后的AI回复消息 ID: {message_id}")
-                    else:
-                        logger.warning(f"尝试删除终止后的AI回复消息失败或未找到 ID: {message_id}")
-                return # Stop processing this message
-
-            # Log if globally stopped but for a different specific ID
-            # Use the correct variables: stop_requested and target_gen_id_str
-            elif stop_requested and target_gen_id_str is not None and target_gen_id_str != event_gen_id_str:
-                 # This condition means global stop was requested BUT didn't match this specific gen ID.
-                 # The main 'if should_block:' already handled the case where it *did* match.
-                 logger.info(f"chat_message: 全局停止已请求，但目标 GenID ({target_gen_id_str}) 与事件 GenID ({event_gen_id_str}) 不匹配。允许发送消息 (MsgID: {message_id})。")
-            # --- End Logging Block ---
-
-            # 如果所有检查都通过 (i.e., not blocked by the 'if should_block:' condition), 则发送消息
-            logger.info(f"chat_message SENDING (Passed Checks): ConvID={self.conversation_id}, MsgID={message_id}, IsUser={is_user}, EventGenID={event_gen_id_str}")
-            await self.send(text_data=json.dumps({
-                'type': 'chat_message',
-                'message': message,
-                'is_user': is_user,
-                'timestamp': timestamp,
-                'message_id': message_id,
-                'generation_id': event_generation_id # Forward generation ID if available
-            }))
-            return # ADDED return here to prevent falling through after sending AI message
-
-        # 对于用户消息，直接发送 (This part remains the same)
-        logger.info(f"chat_message SENDING (User Message): ConvID={self.conversation_id}, MsgID={message_id}, IsUser={is_user}")
+        # 如果检查通过（或为用户消息），则发送消息
+        logger.info(f"chat_message SENDING: ConvID={self.conversation_id}, MsgID={message_id}, IsUser={is_user}, EventGenID={event_generation_id}")
         await self.send(text_data=json.dumps({
-            'type': 'chat_message', # Add type field back
+            'type': 'chat_message',
             'message': message,
             'is_user': is_user,
             'timestamp': timestamp,
-            'message_id': message_id
+            'message_id': message_id,
+            'generation_id': event_generation_id
         }))
 
     async def status_message(self, event):

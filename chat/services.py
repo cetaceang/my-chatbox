@@ -9,7 +9,7 @@ from channels.layers import get_channel_layer
 from django.shortcuts import get_object_or_404
 
 from .models import AIModel, Conversation, Message
-from .state_utils import get_stop_requested_sync, set_stop_requested_sync
+from .state_utils import get_stop_requested_sync, set_stop_requested_sync, touch_stop_request_sync, clear_stop_request_sync
 from .utils import ensure_valid_api_url
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,18 @@ async def generate_ai_response(conversation_id, model_id, user_message_id=None, 
         real_generation_id = str(uuid.uuid4())
 
     try:
+        # 在任务开始时，检查是否已存在停止信号。
+        # 这可以捕获在任务被调度执行前就已发出的停止请求。
+        if get_stop_requested_sync(real_generation_id):
+            logger.warning(f"Service: Stop request for GenID {real_generation_id} detected at task start. Aborting immediately.")
+            final_status = "cancelled"
+            # 尽管任务未真正执行，仍需发送结束信号以更新前端状态
+            await send_generation_event(conversation_id, 'generation_end', {
+                'generation_id': real_generation_id,
+                'status': final_status
+            })
+            return
+
         # 1. 获取会话和模型
         conversation = await get_conversation_async(conversation_id)
         model = await get_model_async(model_id)
@@ -42,7 +54,8 @@ async def generate_ai_response(conversation_id, model_id, user_message_id=None, 
 
         # 2. 准备并发送 generation_start 事件
         await set_db_generation_id(conversation_id, real_generation_id)
-        # set_stop_requested_sync(conversation_id, False) # BUG: This prematurely clears stop signals for other running tasks.
+        # 注意：此处不再需要清理旧的停止状态，因为新的机制是基于 generation_id 的，
+        # 每个任务只关心自己的停止信号，不会被旧信号干扰。
         logger.info(f"Service: Starting generation with ID {real_generation_id} for conversation {conversation_id}")
 
         await send_generation_event(conversation_id, 'generation_start', {
@@ -70,49 +83,52 @@ async def generate_ai_response(conversation_id, model_id, user_message_id=None, 
         
         timeout = aiohttp.ClientTimeout(total=AI_REQUEST_TIMEOUT)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            # 在请求前检查停止信号
-            stop_state = get_stop_requested_sync(conversation_id)
-            if stop_state.get('requested') and str(stop_state.get('generation_id_to_stop')) == real_generation_id:
-                logger.warning(f"Service: Stop request detected for GenID {real_generation_id} before making request. Aborting.")
+            # 在请求前再次检查，以防万一
+            if get_stop_requested_sync(real_generation_id):
+                logger.warning(f"Service: Stop request detected for GenID {real_generation_id} just before making API call. Aborting.")
                 final_status = "cancelled"
             else:
                 async with session.post(api_url, json=request_data, headers=headers) as response:
                     if response.status == 200:
                         if is_streaming:
-                            # 最终修复：根据用户提供的服务器端伪流式代码，实现一个健壮的客户端。
-                            # 服务器行为：
-                            # 1. 发送多个空的 "heartbeat" 数据块。
-                            # 2. 发送一个包含完整最终内容的单个数据块。
-                            # 3. 关闭连接（不发送 [DONE]）。
                             buffer = b''
+                            last_heartbeat_time = time.time()
+                            HEARTBEAT_INTERVAL = 15  # 每15秒进行一次心跳
+
                             while True:
                                 try:
+                                    # 心跳逻辑：定期延长停止信号的TTL
+                                    current_time = time.time()
+                                    if current_time - last_heartbeat_time > HEARTBEAT_INTERVAL:
+                                        touch_stop_request_sync(real_generation_id)
+                                        last_heartbeat_time = current_time
+
+                                    # 检查停止信号
+                                    if get_stop_requested_sync(real_generation_id):
+                                        logger.warning(f"Service: Stop request detected for GenID {real_generation_id}. Stopping stream.")
+                                        final_status = "cancelled"
+                                        break
+
                                     # 使用块间超时来防止无限期挂起
                                     async with asyncio.timeout(INTER_CHUNK_TIMEOUT):
                                         chunk = await response.content.read(4096)
                                     
                                     if not chunk:
-                                        # 服务器关闭了连接，这是预期的流结束方式
                                         break
 
                                     buffer += chunk
-                                    
-                                    # SSE 消息以 \n\n 分隔
                                     messages = buffer.split(b'\n\n')
-                                    buffer = messages.pop()  # 保留最后一个不完整的消息
+                                    buffer = messages.pop()
 
                                     for msg in messages:
                                         if not msg:
                                             continue
                                         
-                                        # 检查停止信号
-                                        stop_state = get_stop_requested_sync(conversation_id)
-                                        if stop_state.get('requested') and str(stop_state.get('generation_id_to_stop')) == real_generation_id:
-                                            logger.warning(f"Service: Stop request detected for GenID {real_generation_id}. Stopping stream.")
+                                        # 在解析前再次检查，减少延迟
+                                        if get_stop_requested_sync(real_generation_id):
                                             final_status = "cancelled"
                                             break
 
-                                        # 解析单个消息 (可能有多行)
                                         for line in msg.split(b'\n'):
                                             line_str = line.decode('utf-8').strip()
                                             if line_str.startswith('data: '):
@@ -166,8 +182,8 @@ async def generate_ai_response(conversation_id, model_id, user_message_id=None, 
 
         # 6. 如果成功，保存AI消息
         if final_status == "completed":
-            stop_state = get_stop_requested_sync(conversation_id)
-            if stop_state.get('requested') and str(stop_state.get('generation_id_to_stop')) == real_generation_id:
+            # 在保存前进行最后一次检查
+            if get_stop_requested_sync(real_generation_id):
                 logger.warning(f"Service: Stop request detected for GenID {real_generation_id} just before saving. Discarding response.")
                 final_status = "cancelled"
             else:
@@ -200,10 +216,8 @@ async def generate_ai_response(conversation_id, model_id, user_message_id=None, 
         if conversation and real_generation_id:
             await clear_db_generation_id(conversation_id, real_generation_id)
             
-            stop_state = get_stop_requested_sync(conversation_id)
-            if str(stop_state.get('generation_id_to_stop')) == real_generation_id:
-                set_stop_requested_sync(conversation_id, False)
-                logger.info(f"Service: Reset global stop state for conversation {conversation_id} as targeted generation {real_generation_id} ended.")
+            # 任务结束时，无论结果如何，都主动、确定地清理停止信号
+            clear_stop_request_sync(real_generation_id)
 
             event_data = {
                 'generation_id': real_generation_id,
