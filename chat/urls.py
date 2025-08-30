@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import pages, api, admin_api, user_api
+from .views import pages, admin_api, user_api
 
 urlpatterns = [
     # 主要页面
