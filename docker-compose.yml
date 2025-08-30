@@ -2,9 +2,8 @@ version: '3.8'
 
 services:
   web:
-    # 使用 Docker Hub 上的镜像代替本地构建
-    # 请将 'your_dockerhub_username/my-chatbox:latest' 替换为你自己的镜像地址
-    image: cetaceang/my-chatbox:latest
+    # 使用 GitHub Container Registry (ghcr.io) 上的镜像
+    image: ghcr.io/cetaceang/my-chatbox:latest
     container_name: my-chatbox-web
     restart: unless-stopped
     ports:
