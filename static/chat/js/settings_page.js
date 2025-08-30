@@ -233,8 +233,8 @@ document.addEventListener('DOMContentLoaded', () => {
  
      // Function to delete a user
      function deleteUser(userId) {
-         fetch('/users/api/manage-roles/', { // Use the correct endpoint
-             method: 'DELETE',
+         fetch('/chat/api/admin/delete_user/', { // Use the correct endpoint
+             method: 'POST', // Backend expects POST
              headers: {
                  'Content-Type': 'application/json',
                  'X-CSRFToken': csrfToken
@@ -787,17 +787,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (setSelfAdminBtn && currentUserId) {
             setSelfAdminBtn.addEventListener('click', () => {
-                fetch('/users/api/manage-roles/', { // Assuming this endpoint exists for non-admins to request admin
+                // This button should only be visible if there are no admins.
+                // The backend should enforce the "create first admin" logic.
+                // We will call the new, correct endpoint.
+                fetch('/chat/api/admin/set_admin_status/', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
                     body: JSON.stringify({ user_id: currentUserId, is_admin: true })
                 })
-                .then(response => {
-                    if (response.status === 403) { // Permission denied, try creating first admin
-                        return createFirstAdmin();
-                    }
-                    return response.json();
-                })
+                .then(response => response.json())
                 .then(data => {
                     if (data.success) {
                         alert('已成功将您设为管理员！页面将刷新以应用更改。');

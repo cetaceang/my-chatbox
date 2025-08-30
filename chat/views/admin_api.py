@@ -16,9 +16,24 @@ from chat.models import AIProvider, AIModel
 from chat.utils import ensure_valid_api_url # Import from local utils
 from .decorators import admin_required # Import from local decorators
 from users.models import UserProfile # Assuming UserProfile is in users.models
-from .api import is_user_admin
+# from .api import is_user_admin # No longer needed
 
 logger = logging.getLogger(__name__)
+
+def is_user_admin(user):
+    """
+    检查用户是否为管理员。如果用户没有profile，则为其创建一个。
+    """
+    if not user or not user.is_authenticated:
+        return False
+    try:
+        # 获取或创建 UserProfile，确保每个用户都有一个 profile
+        profile, created = UserProfile.objects.get_or_create(user=user)
+        return profile.is_admin
+    except Exception as e:
+        # 记录潜在的错误，但安全地返回 False
+        logger.error(f"检查用户 {user.id} 的管理员状态时出错: {e}")
+        return False
 
 # API接口 - 管理功能 (通常需要管理员权限)
 
@@ -435,6 +450,102 @@ def test_api_connection(request, provider_id):
         return JsonResponse({
             'success': False,
             'message': f"处理请求失败: {str(e)}"
+        }, status=500)
+
+
+@admin_required
+@csrf_exempt
+@require_http_methods(["POST"])
+def set_admin_status(request):
+    """
+    设置用户的管理员状态 (管理员)
+    需要参数:
+    - user_id: 要操作的用户ID
+    - is_admin: true 或 false
+    """
+    try:
+        data = json.loads(request.body)
+        user_id = data.get('user_id')
+        is_admin = data.get('is_admin')
+
+        if user_id is None or not isinstance(is_admin, bool):
+            return JsonResponse({'success': False, 'message': "缺少或无效的参数 (user_id, is_admin: boolean)"}, status=400)
+
+        target_user_id = int(user_id)
+
+        # 关键安全检查：防止管理员撤销自己的权限，除非还有其他管理员
+        if request.user.id == target_user_id and not is_admin:
+            other_admins_count = UserProfile.objects.filter(is_admin=True).exclude(user_id=request.user.id).count()
+            if other_admins_count == 0:
+                return JsonResponse({'success': False, 'message': "不能撤销最后一个管理员的权限"}, status=403)
+
+        target_user = get_object_or_404(User, id=target_user_id)
+        profile, created = UserProfile.objects.get_or_create(user=target_user)
+
+        profile.is_admin = is_admin
+        profile.save()
+
+        action_text = "授予" if is_admin else "撤销"
+        message = f"成功 {action_text} 用户 {target_user.username} 的管理员权限。"
+        return JsonResponse({'success': True, 'message': message})
+
+    except User.DoesNotExist:
+        return JsonResponse({'success': False, 'message': "用户不存在"}, status=404)
+    except ValueError:
+        return JsonResponse({'success': False, 'message': "无效的用户ID"}, status=400)
+    except Exception as e:
+        logger.error(f"设置管理员状态失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JsonResponse({
+            'success': False,
+            'message': f"操作失败: {str(e)}"
+        }, status=500)
+
+
+@admin_required
+@csrf_exempt
+@require_http_methods(["POST"]) # Use POST for deletion to include body
+def delete_user_api(request):
+    """
+    永久删除一个用户 (管理员)
+    需要参数:
+    - user_id: 要删除的用户ID
+    """
+    try:
+        data = json.loads(request.body)
+        user_id = data.get('user_id')
+
+        if not user_id:
+            return JsonResponse({'success': False, 'message': "缺少用户ID"}, status=400)
+
+        target_user_id = int(user_id)
+
+        # 安全检查：不能删除自己
+        if request.user.id == target_user_id:
+            return JsonResponse({'success': False, 'message': "不能删除自己"}, status=403)
+
+        target_user = get_object_or_404(User, id=target_user_id)
+
+        # 安全检查：不能删除其他管理员
+        if is_user_admin(target_user):
+            return JsonResponse({'success': False, 'message': "不能删除其他管理员"}, status=403)
+
+        username = target_user.username
+        target_user.delete() # This will cascade and delete UserProfile etc.
+
+        message = f"用户 {username} 已被永久删除。"
+        return JsonResponse({'success': True, 'message': message})
+
+    except User.DoesNotExist:
+        return JsonResponse({'success': False, 'message': "用户不存在"}, status=404)
+    except ValueError:
+        return JsonResponse({'success': False, 'message': "无效的用户ID"}, status=400)
+    except Exception as e:
+        logger.error(f"删除用户失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JsonResponse({
+            'success': False,
+            'message': f"操作失败: {str(e)}"
         }, status=500)
 
 

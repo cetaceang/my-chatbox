@@ -81,11 +81,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
             logger.info(f"Consumer connected for a new conversation.")
 
     async def disconnect(self, close_code):
-        # 离开对话组
-        await self.channel_layer.group_discard(
-            self.conversation_group_name,
-            self.channel_name
-        )
+        # 检查属性是否存在，如果存在才离开对话组
+        if hasattr(self, 'conversation_group_name'):
+            await self.channel_layer.group_discard(
+                self.conversation_group_name,
+                self.channel_name
+            )
 
         # 如果有活跃的请求任务，取消它
         if self.active_request_task:
@@ -94,8 +95,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         # 清理全局终止状态 (使用新的同步函数)
         # No need for await
-        clear_stop_request_state_sync(self.conversation_id)
-        logger.info(f"Consumer disconnected, cleared stop state for {self.conversation_id}")
+        # 同样，只在 conversation_id 存在时才清理
+        if hasattr(self, 'conversation_id') and self.conversation_id:
+            clear_stop_request_state_sync(self.conversation_id)
+            logger.info(f"Consumer disconnected, cleared stop state for {self.conversation_id}")
 
     async def receive(self, text_data):
         """
