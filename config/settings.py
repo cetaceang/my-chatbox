@@ -51,6 +51,15 @@ elif not ALLOWED_HOSTS and not DEBUG:
      # raise ValueError("ALLOWED_HOSTS cannot be empty in production")
      pass
 
+# CSRF Trusted Origins
+csrf_trusted_origins_str = os.getenv('CSRF_TRUSTED_ORIGINS', '')
+CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_trusted_origins_str.split(',') if origin.strip()]
+
+if not CSRF_TRUSTED_ORIGINS and DEBUG:
+    # Default to allowing localhost and 127.0.0.1 on port 8000 for local development
+    CSRF_TRUSTED_ORIGINS = ['http://localhost:8000', 'http://127.0.0.1:8000']
+
+
 # HTTPS Proxy Settings (conditionally enabled via .env)
 ENABLE_HTTPS_PROXY = os.getenv('ENABLE_HTTPS_PROXY_SETTINGS', 'False').lower() in ('true', '1', 't')
 if ENABLE_HTTPS_PROXY:
