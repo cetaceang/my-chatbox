@@ -789,13 +789,9 @@ document.addEventListener('DOMContentLoaded', () => {
             setSelfAdminBtn.addEventListener('click', () => {
                 // This button should only be visible if there are no admins.
                 // The backend should enforce the "create first admin" logic.
-                // We will call the new, correct endpoint.
-                fetch('/chat/api/admin/set_admin_status/', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
-                    body: JSON.stringify({ user_id: currentUserId, is_admin: true })
-                })
-                .then(response => response.json())
+                // This button should only be visible if there are no admins.
+                // The backend should enforce the "create first admin" logic.
+                createFirstAdmin()
                 .then(data => {
                     if (data.success) {
                         alert('已成功将您设为管理员！页面将刷新以应用更改。');
