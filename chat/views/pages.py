@@ -75,17 +75,8 @@ def history_view(request):
 @login_required
 def settings_view(request):
     """API设置视图"""
-    # 检查用户是否为管理员
-    try:
-        profile = request.user.profile
-        is_admin = profile.is_admin
-    except UserProfile.DoesNotExist:
-        is_admin = False
-        # 如果用户没有资料，创建一个
-        profile = UserProfile.objects.create(user=request.user)
-    except AttributeError: # Handle case where user object might not have 'profile' yet
-        is_admin = False
-        profile = UserProfile.objects.create(user=request.user)
+    # 检查用户是否为管理员 (现在可以安全地访问 profile)
+    is_admin = getattr(request.user, 'profile', None) and request.user.profile.is_admin
 
 
     # 所有用户都可以访问设置页面，但内容会有所不同
@@ -96,16 +87,12 @@ def settings_view(request):
     # 如果是管理员，获取服务提供商和用户列表
     if is_admin:
         providers = AIProvider.objects.all()
-        for user in User.objects.all():
-            try:
-                user_profile = user.profile
-            except UserProfile.DoesNotExist:
-                user_profile = UserProfile.objects.create(user=user)
-
+        # 由于信号的存在，现在可以安全地访问 user.profile
+        for user in User.objects.select_related('profile').all():
             users.append({
                 'id': user.id,
                 'username': user.username,
-                'is_admin': user_profile.is_admin,
+                'is_admin': user.profile.is_admin,
                 'date_joined': user.date_joined
             })
 

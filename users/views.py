@@ -52,15 +52,8 @@ def logout_view(request):
 @csrf_exempt
 def manage_user_role(request):
     """管理用户角色"""
-    # 检查当前用户是否是管理员
-    try:
-        current_user_profile = request.user.profile
-    except UserProfile.DoesNotExist:
-        # 如果当前用户没有资料，创建一个
-        current_user_profile = UserProfile.objects.create(user=request.user)
-    
-    # 只有管理员可以管理用户角色
-    if not current_user_profile.is_admin:
+    # 检查当前用户是否是管理员 (现在可以安全地访问 profile)
+    if not getattr(request.user, 'profile', None) or not request.user.profile.is_admin:
         return JsonResponse({
             'success': False,
             'message': '权限不足，只有管理员可以管理用户角色'
@@ -69,16 +62,12 @@ def manage_user_role(request):
     if request.method == 'GET':
         # 获取所有用户及其角色
         users_data = []
-        for user in User.objects.all():
-            try:
-                profile = user.profile
-            except UserProfile.DoesNotExist:
-                profile = UserProfile.objects.create(user=user)
-            
+        # 使用 select_related 提高效率
+        for user in User.objects.select_related('profile').all():
             users_data.append({
                 'id': user.id,
                 'username': user.username,
-                'is_admin': profile.is_admin,
+                'is_admin': user.profile.is_admin,
                 'date_joined': user.date_joined.strftime('%Y-%m-%d %H:%M:%S')
             })
         
@@ -99,13 +88,9 @@ def manage_user_role(request):
             
             user = get_object_or_404(User, id=user_id)
             
-            try:
-                profile = user.profile
-            except UserProfile.DoesNotExist:
-                profile = UserProfile.objects.create(user=user)
-            
-            profile.is_admin = is_admin
-            profile.save()
+            # 现在可以安全地访问 profile
+            user.profile.is_admin = is_admin
+            user.profile.save()
             
             return JsonResponse({
                 'success': True,
@@ -187,14 +172,15 @@ def create_first_admin(request):
                     'message': '只能将自己设为管理员'
                 }, status=403)
             
-            # 设置当前用户为管理员
-            try:
-                profile = request.user.profile
-            except UserProfile.DoesNotExist:
-                profile = UserProfile.objects.create(user=request.user)
-            
+            # 设置当前用户为管理员 (现在可以安全地访问 profile)
+            profile = request.user.profile
             profile.is_admin = True
             profile.save()
+            
+            # 同时，将用户设置为 staff，以便访问 Django Admin
+            user = request.user
+            user.is_staff = True
+            user.save()
             
             return JsonResponse({
                 'success': True,

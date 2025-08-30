@@ -22,18 +22,12 @@ logger = logging.getLogger(__name__)
 
 def is_user_admin(user):
     """
-    检查用户是否为管理员。如果用户没有profile，则为其创建一个。
+    检查用户是否为管理员 (现在可以安全地访问 profile)。
     """
     if not user or not user.is_authenticated:
         return False
-    try:
-        # 获取或创建 UserProfile，确保每个用户都有一个 profile
-        profile, created = UserProfile.objects.get_or_create(user=user)
-        return profile.is_admin
-    except Exception as e:
-        # 记录潜在的错误，但安全地返回 False
-        logger.error(f"检查用户 {user.id} 的管理员状态时出错: {e}")
-        return False
+    # 由于信号的存在，现在可以安全地访问 user.profile
+    return getattr(user, 'profile', None) and user.profile.is_admin
 
 # API接口 - 管理功能 (通常需要管理员权限)
 
@@ -480,10 +474,9 @@ def set_admin_status(request):
                 return JsonResponse({'success': False, 'message': "不能撤销最后一个管理员的权限"}, status=403)
 
         target_user = get_object_or_404(User, id=target_user_id)
-        profile, created = UserProfile.objects.get_or_create(user=target_user)
-
-        profile.is_admin = is_admin
-        profile.save()
+        # 现在可以安全地访问 profile
+        target_user.profile.is_admin = is_admin
+        target_user.profile.save()
 
         action_text = "授予" if is_admin else "撤销"
         message = f"成功 {action_text} 用户 {target_user.username} 的管理员权限。"
@@ -658,8 +651,8 @@ def manage_user_ban_status(request):
 
 
         target_user = get_object_or_404(User, id=target_user_id)
-        # 获取或创建 UserProfile，以防某些用户还没有 Profile
-        profile, created = UserProfile.objects.get_or_create(user=target_user)
+        # 现在可以安全地访问 profile
+        profile = target_user.profile
 
         # 防止管理员封禁其他管理员 (可选策略)
         if profile.is_admin:
