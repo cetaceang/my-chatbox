@@ -131,147 +131,150 @@ function initWebSocket(options = {}) {
 
     chatSocket.onmessage = (e) => {
         const eventData = JSON.parse(e.data);
-        const { type, data } = eventData;
-        const messageContainer = document.querySelector('#message-container');
-        if (!messageContainer) return;
-
-        switch (type) {
-            case 'new_conversation_created':
-                console.log("New conversation created by backend:", eventData.data);
-                const { conversation_id, title } = eventData.data;
-                
-                // 1. Update the state manager
-                window.ChatStateManager.setConversationId(conversation_id);
-                
-                // 2. Update the URL
-                const newUrl = `/chat/?conversation_id=${conversation_id}`;
-                history.pushState({ conversationId: conversation_id }, title, newUrl);
-                
-                // 3. Update the global variable
-                window.conversationId = conversation_id;
-                
-                // 4. Refresh the conversation list in the sidebar
-                fetch('/chat/conversation_list/')
-                    .then(response => response.text())
-                    .then(html => {
-                        const conversationListDiv = document.getElementById('conversation-list');
-                        if (conversationListDiv) {
-                            conversationListDiv.innerHTML = html;
-                        }
-                    })
-                    .catch(error => console.error('Error refreshing conversation list:', error));
-                break;
-
-            case 'user_message_id_update':
-                // 更新ID管理器
-                window.tempIdManager.set(eventData.temp_id, eventData.user_message_id);
-                
-                // 更新DOM
-                const userMessageDiv = messageContainer.querySelector(`.alert[data-temp-id="${eventData.temp_id}"]`);
-                if (userMessageDiv) {
-                    userMessageDiv.setAttribute('data-message-id', eventData.user_message_id);
-                }
-                
-                // 新增：同步ChatStateManager的状态
-                window.ChatState.updateMessageId(eventData.temp_id, eventData.user_message_id);
-                break;
-
-            // DEPRECATED: 'generation_stopped' is no longer used.
-            // case 'generation_stopped':
-            //     window.ChatStateManager.confirmGlobalStop();
-            //     break;
-
-            case 'generation_start':
-                window.ChatStateManager.handleGenerationStart(data.generation_id, data.temp_id);
-                break;
-
-            case 'generation_end': {
-                const { generation_id, status, error } = data;
-
-                if (status === 'failed' && error) {
-                    console.error(`Generation failed for ID ${generation_id}:`, error);
-                    const messageDiv = createOrFindMessageDiv(generation_id, false);
-                    if (messageDiv) {
-                        let errorMessage = error;
-                        try {
-                            const errorJson = JSON.parse(error);
-                            if (errorJson.error && errorJson.error.message) {
-                                errorMessage = errorJson.error.message;
-                            }
-                        } catch (e) { /* Not a JSON error, use raw text */ }
-
-                        messageDiv.classList.remove('alert-secondary');
-                        messageDiv.classList.add('alert-danger');
-                        messageDiv.innerHTML = `
-                            <div class="d-flex justify-content-between">
-                                <span>助手 (错误)</span>
-                                <div><small>${new Date().toLocaleTimeString()}</small></div>
-                            </div>
-                            <hr>
-                            <p class="text-danger"><strong>生成失败:</strong></p>
-                            <pre class="error-message-pre" style="white-space: pre-wrap; word-break: break-all;"><code>${escapeHtml(errorMessage)}</code></pre>
-                        `;
-                        messageDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                    }
-                }
-
-                window.ChatStateManager.handleGenerationEnd(generation_id, status);
-                break;
-            }
-
-            case 'full_message': {
-                const { generation_id, temp_id, content } = data;
-                if (window.ChatStateManager.isGenerationCancelled(generation_id)) return;
-
-                const messageDiv = createOrFindMessageDiv(temp_id, false);
-                if (messageDiv) {
-                    const renderTarget = messageDiv.querySelector('.render-target');
-                    renderTarget.setAttribute('data-original-content', content);
-                    renderMessageContent(messageDiv, false); // 非流式，不使用打字机
-                    messageDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                }
-                break;
-            }
-
-            case 'stream_update': {
-                const { generation_id, temp_id, content } = data;
-                if (window.ChatStateManager.isGenerationCancelled(generation_id)) return;
-
-                const messageDiv = createOrFindMessageDiv(temp_id, true);
-                if (messageDiv) {
-                    const renderTarget = messageDiv.querySelector('.render-target');
-                    const currentContent = renderTarget.getAttribute('data-original-content') || '';
-                    renderTarget.setAttribute('data-original-content', currentContent + content);
-                    renderMessageContent(messageDiv, true); // 流式，使用打字机
-                    messageDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                }
-                break;
-            }
-
-            case 'id_update': {
-                const { temp_id, message_id } = data;
-                const streamingDiv = document.getElementById(`ai-response-streaming-${temp_id}`);
-                const fullDiv = document.getElementById(`ai-response-full-${temp_id}`);
-                const finalDiv = streamingDiv || fullDiv;
-
-                if (finalDiv) {
-                    finalDiv.setAttribute('data-message-id', message_id);
-                    finalDiv.removeAttribute('id');
-                    finalDiv.removeAttribute('data-temp-id');
-
-                    const headerDiv = finalDiv.querySelector('.d-flex.justify-content-between > div');
-                    if (headerDiv && !headerDiv.querySelector('.delete-message-btn')) {
-                        const deleteBtn = document.createElement('button');
-                        deleteBtn.className = 'btn btn-sm btn-outline-danger delete-message-btn ms-2';
-                        deleteBtn.title = '删除消息';
-                        deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
-                        headerDiv.appendChild(deleteBtn);
-                    }
-                }
-                break;
-            }
-        }
+        handleIncomingMessage(eventData);
     };
+}
+
+/**
+ * 统一处理来自WebSocket或HTTP回退的消息事件。
+ * @param {object} eventData - 包含 type 和 data 的事件对象。
+ */
+function handleIncomingMessage(eventData) {
+    const { type, data } = eventData;
+    const messageContainer = document.querySelector('#message-container');
+    if (!messageContainer) return;
+
+    switch (type) {
+        case 'new_conversation_created':
+            console.log("New conversation created by backend:", eventData.data);
+            const { conversation_id, title } = eventData.data;
+            
+            // 1. Update the state manager
+            window.ChatStateManager.setConversationId(conversation_id);
+            
+            // 2. Update the URL
+            const newUrl = `/chat/?conversation_id=${conversation_id}`;
+            history.pushState({ conversationId: conversation_id }, title, newUrl);
+            
+            // 3. Update the global variable
+            window.conversationId = conversation_id;
+            
+            // 4. Refresh the conversation list in the sidebar
+            fetch('/chat/conversation_list/')
+                .then(response => response.text())
+                .then(html => {
+                    const conversationListDiv = document.getElementById('conversation-list');
+                    if (conversationListDiv) {
+                        conversationListDiv.innerHTML = html;
+                    }
+                })
+                .catch(error => console.error('Error refreshing conversation list:', error));
+            break;
+
+        case 'user_message_id_update':
+            // 更新ID管理器
+            window.tempIdManager.set(eventData.temp_id, eventData.user_message_id);
+            
+            // 更新DOM
+            const userMessageDiv = messageContainer.querySelector(`.alert[data-temp-id="${eventData.temp_id}"]`);
+            if (userMessageDiv) {
+                userMessageDiv.setAttribute('data-message-id', eventData.user_message_id);
+            }
+            
+            // 新增：同步ChatStateManager的状态
+            window.ChatState.updateMessageId(eventData.temp_id, eventData.user_message_id);
+            break;
+
+        case 'generation_start':
+            window.ChatStateManager.handleGenerationStart(data.generation_id, data.temp_id);
+            break;
+
+        case 'generation_end': {
+            const { generation_id, status, error } = data;
+
+            if (status === 'failed' && error) {
+                console.error(`Generation failed for ID ${generation_id}:`, error);
+                const messageDiv = createOrFindMessageDiv(generation_id, false);
+                if (messageDiv) {
+                    let errorMessage = error;
+                    try {
+                        const errorJson = JSON.parse(error);
+                        if (errorJson.error && errorJson.error.message) {
+                            errorMessage = errorJson.error.message;
+                        }
+                    } catch (e) { /* Not a JSON error, use raw text */ }
+
+                    messageDiv.classList.remove('alert-secondary');
+                    messageDiv.classList.add('alert-danger');
+                    messageDiv.innerHTML = `
+                        <div class="d-flex justify-content-between">
+                            <span>助手 (错误)</span>
+                            <div><small>${new Date().toLocaleTimeString()}</small></div>
+                        </div>
+                        <hr>
+                        <p class="text-danger"><strong>生成失败:</strong></p>
+                        <pre class="error-message-pre" style="white-space: pre-wrap; word-break: break-all;"><code>${escapeHtml(errorMessage)}</code></pre>
+                    `;
+                    messageDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                }
+            }
+
+            window.ChatStateManager.handleGenerationEnd(generation_id, status);
+            break;
+        }
+
+        case 'full_message': {
+            const { generation_id, temp_id, content } = data;
+            if (window.ChatStateManager.isGenerationCancelled(generation_id)) return;
+
+            const messageDiv = createOrFindMessageDiv(temp_id, false);
+            if (messageDiv) {
+                const renderTarget = messageDiv.querySelector('.render-target');
+                renderTarget.setAttribute('data-original-content', content);
+                renderMessageContent(messageDiv, false); // 非流式，不使用打字机
+                messageDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+            break;
+        }
+
+        case 'stream_update': {
+            const { generation_id, temp_id, content } = data;
+            if (window.ChatStateManager.isGenerationCancelled(generation_id)) return;
+
+            const messageDiv = createOrFindMessageDiv(temp_id, true);
+            if (messageDiv) {
+                const renderTarget = messageDiv.querySelector('.render-target');
+                const currentContent = renderTarget.getAttribute('data-original-content') || '';
+                renderTarget.setAttribute('data-original-content', currentContent + content);
+                renderMessageContent(messageDiv, true); // 流式，使用打字机
+                messageDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+            break;
+        }
+
+        case 'id_update': {
+            const { temp_id, message_id } = data;
+            const streamingDiv = document.getElementById(`ai-response-streaming-${temp_id}`);
+            const fullDiv = document.getElementById(`ai-response-full-${temp_id}`);
+            const finalDiv = streamingDiv || fullDiv;
+
+            if (finalDiv) {
+                finalDiv.setAttribute('data-message-id', message_id);
+                finalDiv.removeAttribute('id');
+                finalDiv.removeAttribute('data-temp-id');
+
+                const headerDiv = finalDiv.querySelector('.d-flex.justify-content-between > div');
+                if (headerDiv && !headerDiv.querySelector('.delete-message-btn')) {
+                    const deleteBtn = document.createElement('button');
+                    deleteBtn.className = 'btn btn-sm btn-outline-danger delete-message-btn ms-2';
+                    deleteBtn.title = '删除消息';
+                    deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
+                    headerDiv.appendChild(deleteBtn);
+                }
+            }
+            break;
+        }
+    }
 }
 
 function sendWebSocketRequest(type, payload) {
@@ -395,10 +398,7 @@ async function sendHttpRequestFallback(type, payload, settings) { // settings ca
                         }
 
                         const eventPayload = { type: eventType, data: eventData };
-                        // 直接调用 onmessage，确保逻辑统一
-                        if (window.chatSocket && typeof window.chatSocket.onmessage === 'function') {
-                            window.chatSocket.onmessage({ data: JSON.stringify(eventPayload) });
-                        }
+                        handleIncomingMessage(eventPayload);
                     }
                 }
             }
@@ -406,12 +406,10 @@ async function sendHttpRequestFallback(type, payload, settings) { // settings ca
             // 处理JSON响应
             const data = await response.json();
             if (data.success) {
-                // 模拟 onmessage 事件流，确保逻辑统一
-                if (window.chatSocket && typeof window.chatSocket.onmessage === 'function') {
-                    window.chatSocket.onmessage({ data: JSON.stringify({ type: 'full_message', data: { generation_id: data.generation_id, temp_id: tempId, content: data.content } }) });
-                    window.chatSocket.onmessage({ data: JSON.stringify({ type: 'id_update', data: { temp_id: tempId, message_id: data.message_id } }) });
-                    window.chatSocket.onmessage({ data: JSON.stringify({ type: 'generation_end', data: { generation_id: data.generation_id, status: 'completed' } }) });
-                }
+                // 直接调用 handleIncomingMessage，确保逻辑统一
+                handleIncomingMessage({ type: 'full_message', data: { generation_id: data.generation_id, temp_id: tempId, content: data.content } });
+                handleIncomingMessage({ type: 'id_update', data: { temp_id: tempId, message_id: data.message_id } });
+                handleIncomingMessage({ type: 'generation_end', data: { generation_id: data.generation_id, status: 'completed' } });
             } else {
                 throw new Error(data.error || '非流式响应报告未知错误');
             }
@@ -419,24 +417,16 @@ async function sendHttpRequestFallback(type, payload, settings) { // settings ca
 
     } catch (error) {
         console.error('[HTTP Fallback] Request failed:', error);
-        // 统一通过 onmessage 报告错误
-        if (window.chatSocket && typeof window.chatSocket.onmessage === 'function') {
-            const errorPayload = {
-                type: 'generation_end',
-                data: {
-                    generation_id: tempId,
-                    status: 'failed',
-                    error: `HTTP请求失败: ${error.message}`
-                }
-            };
-            window.chatSocket.onmessage({ data: JSON.stringify(errorPayload) });
-        } else {
-            // 最终回退方案
-            displaySystemError(`HTTP请求失败: ${error.message}`);
-            if (tempId) {
-                window.ChatStateManager.handleGenerationEnd(tempId, 'failed');
+        // 统一通过 handleIncomingMessage 报告错误
+        const errorPayload = {
+            type: 'generation_end',
+            data: {
+                generation_id: tempId,
+                status: 'failed',
+                error: `HTTP请求失败: ${error.message}`
             }
-        }
+        };
+        handleIncomingMessage(errorPayload);
     }
 }
 
