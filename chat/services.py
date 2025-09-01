@@ -4,9 +4,15 @@ import uuid
 import time
 import asyncio
 import aiohttp
+import base64
+import re
+import mimetypes
+import os
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.shortcuts import get_object_or_404
+from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
 
 from .models import AIModel, Conversation, Message
 from .state_utils import get_stop_requested_sync, set_stop_requested_sync, touch_stop_request_sync, clear_stop_request_sync
@@ -24,10 +30,11 @@ async def _send_event(callback, conversation_id, event_type, data):
         await send_generation_event(conversation_id, event_type, data)
 
 
-async def generate_ai_response(conversation_id, model_id, user_message_id=None, is_regenerate=False, generation_id=None, temp_id=None, is_streaming=True, event_callback=None):
+async def generate_ai_response(conversation_id, model_id, message, user_message_id=None, is_regenerate=False, generation_id=None, temp_id=None, is_streaming=True, event_callback=None, file_data=None, file_name=None, file_type=None):
     """
     核心服务函数，用于生成AI回复。
     - 支持流式和非流式两种模式。
+    - 支持文本和多模态（图片）输入。
     - 处理新消息和重新生成两种情况。
     - 通过 event_callback (如果提供) 或 channel_layer (默认) 推送事件。
     """
@@ -42,16 +49,44 @@ async def generate_ai_response(conversation_id, model_id, user_message_id=None, 
 
     try:
         # 在任务开始时，检查是否已存在停止信号。
-        # 这可以捕获在任务被调度执行前就已发出的停止请求。
         if get_stop_requested_sync(real_generation_id):
             logger.warning(f"Service: Stop request for GenID {real_generation_id} detected at task start. Aborting immediately.")
             final_status = "cancelled"
-            # 尽管任务未真正执行，仍需发送结束信号以更新前端状态
             await _send_event(event_callback, conversation_id, 'generation_end', {
                 'generation_id': real_generation_id,
                 'status': final_status
             })
             return
+
+        # --- 新增：处理图片上传 ---
+        if file_data and file_name and user_message_id:
+            try:
+                file_content = base64.b64decode(file_data)
+                saved_path = await database_sync_to_async(default_storage.save)(f"uploads/{real_generation_id}_{file_name}", ContentFile(file_content))
+                
+                @database_sync_to_async
+                def _update_db_message(msg_id, text_content, path):
+                    try:
+                        msg = Message.objects.get(id=msg_id)
+                        if text_content.strip():
+                            msg.content = f"{text_content}\n[file:{path}]"
+                        else:
+                            msg.content = f"[file:{path}]"
+                        msg.save()
+                        logger.info(f"已更新用户消息 {msg_id}，添加文件引用: {path}")
+                    except Message.DoesNotExist:
+                        logger.error(f"无法找到用户消息 {msg_id} 来更新")
+                        raise
+                
+                await _update_db_message(user_message_id, message, saved_path)
+            except Exception as e:
+                logger.error(f"图片处理失败: {e}", exc_info=True)
+                await _send_event(event_callback, conversation_id, 'generation_end', {
+                    'generation_id': real_generation_id,
+                    'status': 'failed',
+                    'error': f'图片处理失败: {str(e)}'
+                })
+                return
 
         # 1. 获取会话和模型
         conversation = await get_conversation_async(conversation_id)
@@ -62,8 +97,6 @@ async def generate_ai_response(conversation_id, model_id, user_message_id=None, 
 
         # 2. 准备并发送 generation_start 事件
         await set_db_generation_id(conversation_id, real_generation_id)
-        # 注意：此处不再需要清理旧的停止状态，因为新的机制是基于 generation_id 的，
-        # 每个任务只关心自己的停止信号，不会被旧信号干扰。
         logger.info(f"Service: Starting generation with ID {real_generation_id} for conversation {conversation_id}")
 
         await _send_event(event_callback, conversation_id, 'generation_start', {
@@ -267,12 +300,6 @@ def get_model_async(model_id):
     except AIModel.DoesNotExist:
         return None
 
-import re
-import base64
-import mimetypes
-import os
-from django.core.files.storage import default_storage
-
 @database_sync_to_async
 def prepare_history_messages(conversation, model, user_message_id, is_regenerate):
     """准备用于API请求的消息历史记录，支持多模态内容。"""
@@ -428,66 +455,3 @@ def extract_content_from_chunk(chunk_json):
         if 'message' in choice: # 非流式
             return choice['message'].get('content')
     return None
-
-async def generate_ai_response_with_image(conversation_id, model_id, user_message_id, generation_id, temp_id, message, file_data, file_name, file_type, is_streaming=True, event_callback=None):
-    """
-    处理图片上传的AI响应生成函数
-    """
-    import base64
-    import tempfile
-    import os
-    from django.core.files.storage import default_storage
-    from django.core.files.base import ContentFile
-    
-    try:
-        logger.info(f"开始处理图片AI响应: ConvID={conversation_id}, GenID={generation_id}")
-        
-        # 解码Base64文件数据
-        file_content = base64.b64decode(file_data)
-        
-        # 1. 保存图片到存储系统
-        saved_path = default_storage.save(f"uploads/{generation_id}_{file_name}", ContentFile(file_content))
-        logger.info(f"图片已保存到: {saved_path}")
-        
-        # 2. 更新用户消息内容，添加文件引用
-        await update_user_message_with_file(user_message_id, message, saved_path)
-        
-        # 3. 调用标准的AI响应生成函数
-        asyncio.create_task(generate_ai_response(
-            conversation_id=conversation_id,
-            model_id=model_id,
-            user_message_id=user_message_id,
-            is_regenerate=False,
-            generation_id=generation_id,
-            temp_id=temp_id,
-            is_streaming=is_streaming,
-            event_callback=event_callback
-        ))
-        
-    except Exception as e:
-        logger.error(f"图片AI响应生成失败: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        
-        # 发送错误事件
-        await _send_event(event_callback, conversation_id, 'generation_end', {
-            'generation_id': generation_id,
-            'status': 'failed',
-            'error': f'图片处理失败: {str(e)}'
-        })
-
-@database_sync_to_async
-def update_user_message_with_file(user_message_id, text_content, file_path):
-    """更新用户消息，添加文件引用"""
-    try:
-        message = Message.objects.get(id=user_message_id)
-        # 构建包含文件引用的消息内容
-        if text_content.strip():
-            message.content = f"{text_content}\n[file:{file_path}]"
-        else:
-            message.content = f"[file:{file_path}]"
-        message.save()
-        logger.info(f"已更新用户消息 {user_message_id}，添加文件引用: {file_path}")
-    except Message.DoesNotExist:
-        logger.error(f"无法找到用户消息 {user_message_id}")
-        raise

@@ -446,29 +446,26 @@ async def http_chat_view(request):
             task_kwargs = {
                 'conversation_id': conversation_id,
                 'model_id': model_id,
+                'message': message_content,
                 'user_message_id': user_message_id,
                 'is_regenerate': is_regenerate,
                 'generation_id': generation_id,
                 'temp_id': generation_id,
                 'is_streaming': is_streaming,
-                'event_callback': callback
+                'event_callback': callback,
             }
 
             if is_image_upload and file:
                 import base64
-                from chat.services import generate_ai_response_with_image
-                
                 file_data_b64 = base64.b64encode(file.read()).decode('utf-8')
                 task_kwargs.update({
-                    'message': message_content,
                     'file_data': file_data_b64,
                     'file_name': file.name,
                     'file_type': file.content_type,
                 })
-                asyncio.create_task(generate_ai_response_with_image(**task_kwargs))
-            else:
-                task_kwargs['message'] = message_content # For regenerate
-                asyncio.create_task(generate_ai_response(**task_kwargs))
+
+            # 统一调用
+            asyncio.create_task(generate_ai_response(**task_kwargs))
 
             while True:
                 try:
