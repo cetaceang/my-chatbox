@@ -391,6 +391,24 @@ async function sendHttpRequestFallback(type, payload, settings) { // settings ca
                         const eventType = eventTypeMatch[1];
                         const eventData = JSON.parse(eventDataMatch[1]);
 
+                        // --- 新增：处理心跳和改造的非流式响应 ---
+                        if (eventType === 'heartbeat') {
+                            console.log('[HTTP Fallback] Heartbeat received.');
+                            continue; // 忽略心跳，继续下一次循环
+                        }
+                        
+                        if (eventType === 'generation_end') {
+                            // 对于非流式请求，最终结果在这个事件里
+                            if (eventData.status === 'completed' && eventData.content) {
+                                handleIncomingMessage({ type: 'full_message', data: { generation_id: eventData.generation_id, temp_id: tempId, content: eventData.content } });
+                                handleIncomingMessage({ type: 'id_update', data: { temp_id: tempId, message_id: eventData.message_id } });
+                            }
+                            // 把原始的 generation_end 事件也传递下去，以处理错误状态等
+                            handleIncomingMessage({ type: 'generation_end', data: eventData });
+                            continue; // 处理完就继续
+                        }
+                        // --- 结束新增逻辑 ---
+
                         // 关键修复：如果HTTP流事件数据中缺少temp_id，则从父函数作用域注入它
                         if (eventType === 'stream_update' && !eventData.temp_id) {
                             console.log(`[HTTP Fallback] Injecting missing temp_id '${tempId}' into stream_update event.`);
@@ -403,15 +421,15 @@ async function sendHttpRequestFallback(type, payload, settings) { // settings ca
                 }
             }
         } else {
-            // 处理JSON响应
+            // 这个分支理论上不应该再被执行，但作为保险保留
+            console.warn("[HTTP Fallback] Received a non-SSE response, attempting to parse as JSON.");
             const data = await response.json();
             if (data.success) {
-                // 直接调用 handleIncomingMessage，确保逻辑统一
                 handleIncomingMessage({ type: 'full_message', data: { generation_id: data.generation_id, temp_id: tempId, content: data.content } });
                 handleIncomingMessage({ type: 'id_update', data: { temp_id: tempId, message_id: data.message_id } });
                 handleIncomingMessage({ type: 'generation_end', data: { generation_id: data.generation_id, status: 'completed' } });
             } else {
-                throw new Error(data.error || '非流式响应报告未知错误');
+                throw new Error(data.error || '非流式JSON响应报告未知错误');
             }
         }
 
