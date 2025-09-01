@@ -370,3 +370,127 @@ def sync_conversation_api(request):
             'success': False,
             'message': f"同步失败: {str(e)}"
         }, status=500)
+
+
+from django.http import StreamingHttpResponse
+from chat.services import generate_ai_response
+import asyncio
+import uuid
+
+# 异步辅助函数，用于在同步视图中运行异步代码
+def run_async(coro):
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
+async def collect_events(generator):
+    """异步地从生成器中收集所有项目。"""
+    return [item async for item in generator]
+
+@login_required
+@csrf_exempt
+@require_http_methods(["POST"])
+def http_chat_view(request):
+    """
+    处理HTTP回退的聊天请求，统一支持流式和非流式响应。
+    """
+    try:
+        data = json.loads(request.body)
+        conversation_id = data.get('conversation_id')
+        model_id = data.get('model_id')
+        message_content = data.get('message')
+        is_regenerate = data.get('is_regenerate', False)
+        user_message_id = data.get('message_id')
+        is_streaming = data.get('is_streaming', True)
+        generation_id = data.get('generation_id', str(uuid.uuid4()))
+
+        if not model_id or (not message_content and not is_regenerate):
+            return HttpResponseBadRequest("Missing required parameters (model_id, message/is_regenerate)")
+
+        if not is_regenerate:
+            conversation = get_object_or_404(Conversation, id=conversation_id, user=request.user)
+            user_message = Message.objects.create(
+                conversation=conversation,
+                content=message_content,
+                is_user=True,
+                model_used_id=model_id
+            )
+            user_message_id = user_message.id
+        
+        async def event_generator():
+            event_queue = asyncio.Queue()
+            async def callback(event_type, data):
+                await event_queue.put({'type': event_type, 'data': data})
+
+            asyncio.create_task(
+                generate_ai_response(
+                    conversation_id=conversation_id,
+                    model_id=model_id,
+                    user_message_id=user_message_id,
+                    is_regenerate=is_regenerate,
+                    generation_id=generation_id,
+                    temp_id=generation_id,
+                    is_streaming=is_streaming,
+                    event_callback=callback
+                )
+            )
+            while True:
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), 320)
+                    yield event
+                    if event['type'] == 'generation_end':
+                        break
+                except asyncio.TimeoutError:
+                    logger.error(f"HTTP event_generator timeout for GenID {generation_id}")
+                    yield {'type': 'generation_end', 'data': {'status': 'failed', 'error': '服务器处理超时'}}
+                    break
+        
+        if is_streaming:
+            async def sse_stream():
+                async for event in event_generator():
+                    sse_event = f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
+                    yield sse_event
+            
+            response = StreamingHttpResponse(sse_stream(), content_type='text/event-stream')
+            response['Cache-Control'] = 'no-cache'
+            return response
+        else:
+            events = run_async(collect_events(event_generator()))
+            
+            final_content = ""
+            message_id = None
+            final_status = "failed"
+            error_message = "Unknown error"
+
+            for event in events:
+                if event['type'] == 'full_message':
+                    final_content = event['data'].get('content', '')
+                if event['type'] == 'id_update':
+                    message_id = event['data'].get('message_id')
+                if event['type'] == 'generation_end':
+                    final_status = event['data'].get('status')
+                    if final_status == 'failed':
+                        error_message = event['data'].get('error', error_message)
+
+            if final_status == 'completed':
+                return JsonResponse({
+                    'success': True,
+                    'content': final_content,
+                    'message_id': message_id,
+                    'generation_id': generation_id,
+                })
+            else:
+                return JsonResponse({
+                    'success': False,
+                    'error': error_message,
+                    'generation_id': generation_id,
+                }, status=500)
+
+    except json.JSONDecodeError:
+        return HttpResponseBadRequest("Invalid JSON format")
+    except Exception as e:
+        logger.error(f"HTTP chat view error: {e}", exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)

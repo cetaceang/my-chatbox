@@ -16,12 +16,20 @@ logger = logging.getLogger(__name__)
 
 AI_REQUEST_TIMEOUT = 300  # 使用整数，而不是对象
 
-async def generate_ai_response(conversation_id, model_id, user_message_id=None, is_regenerate=False, generation_id=None, temp_id=None, is_streaming=True):
+async def _send_event(callback, conversation_id, event_type, data):
+    """统一的事件发送函数"""
+    if callback:
+        await callback(event_type, data)
+    else:
+        await send_generation_event(conversation_id, event_type, data)
+
+
+async def generate_ai_response(conversation_id, model_id, user_message_id=None, is_regenerate=False, generation_id=None, temp_id=None, is_streaming=True, event_callback=None):
     """
     核心服务函数，用于生成AI回复。
     - 支持流式和非流式两种模式。
     - 处理新消息和重新生成两种情况。
-    - 通过channel_layer将结果推送回WebSocket。
+    - 通过 event_callback (如果提供) 或 channel_layer (默认) 推送事件。
     """
     conversation = None
     final_status = "unknown"
@@ -39,7 +47,7 @@ async def generate_ai_response(conversation_id, model_id, user_message_id=None, 
             logger.warning(f"Service: Stop request for GenID {real_generation_id} detected at task start. Aborting immediately.")
             final_status = "cancelled"
             # 尽管任务未真正执行，仍需发送结束信号以更新前端状态
-            await send_generation_event(conversation_id, 'generation_end', {
+            await _send_event(event_callback, conversation_id, 'generation_end', {
                 'generation_id': real_generation_id,
                 'status': final_status
             })
@@ -58,7 +66,7 @@ async def generate_ai_response(conversation_id, model_id, user_message_id=None, 
         # 每个任务只关心自己的停止信号，不会被旧信号干扰。
         logger.info(f"Service: Starting generation with ID {real_generation_id} for conversation {conversation_id}")
 
-        await send_generation_event(conversation_id, 'generation_start', {
+        await _send_event(event_callback, conversation_id, 'generation_start', {
             'generation_id': real_generation_id,
             'temp_id': temp_id
         })
@@ -140,7 +148,7 @@ async def generate_ai_response(conversation_id, model_id, user_message_id=None, 
                                                     content_piece = extract_content_from_chunk(chunk_json)
                                                     if content_piece:
                                                         full_content += content_piece
-                                                        await send_generation_event(conversation_id, 'stream_update', {
+                                                        await _send_event(event_callback, conversation_id, 'stream_update', {
                                                             'generation_id': real_generation_id,
                                                             'content': content_piece,
                                                             'temp_id': temp_id
@@ -166,7 +174,7 @@ async def generate_ai_response(conversation_id, model_id, user_message_id=None, 
                             full_content = extract_content_from_chunk(response_json)
                             if full_content:
                                 final_status = "completed"
-                                await send_generation_event(conversation_id, 'full_message', {
+                                await _send_event(event_callback, conversation_id, 'full_message', {
                                     'generation_id': real_generation_id,
                                     'content': full_content,
                                     'temp_id': temp_id
@@ -191,7 +199,7 @@ async def generate_ai_response(conversation_id, model_id, user_message_id=None, 
                     await delete_subsequent_ai_messages(conversation_id, user_message_id)
                 
                 ai_message = await save_ai_message(conversation_id, full_content, model['id'])
-                await send_generation_event(conversation_id, 'id_update', {
+                await _send_event(event_callback, conversation_id, 'id_update', {
                     'generation_id': real_generation_id,
                     'temp_id': temp_id,
                     'message_id': ai_message['id']
@@ -226,7 +234,7 @@ async def generate_ai_response(conversation_id, model_id, user_message_id=None, 
             if final_status == "failed" and 'error_detail' in locals():
                 event_data['error'] = error_detail
 
-            await send_generation_event(conversation_id, 'generation_end', event_data)
+            await _send_event(event_callback, conversation_id, 'generation_end', event_data)
         logger.info(f"Service: Generation {real_generation_id} for conversation {conversation_id} finished with status: {final_status}")
 
 
@@ -418,7 +426,7 @@ def extract_content_from_chunk(chunk_json):
             return choice['message'].get('content')
     return None
 
-async def generate_ai_response_with_image(conversation_id, model_id, user_message_id, generation_id, temp_id, message, file_data, file_name, file_type, is_streaming=True):
+async def generate_ai_response_with_image(conversation_id, model_id, user_message_id, generation_id, temp_id, message, file_data, file_name, file_type, is_streaming=True, event_callback=None):
     """
     处理图片上传的AI响应生成函数
     """
@@ -449,7 +457,8 @@ async def generate_ai_response_with_image(conversation_id, model_id, user_messag
             is_regenerate=False,
             generation_id=generation_id,
             temp_id=temp_id,
-            is_streaming=is_streaming
+            is_streaming=is_streaming,
+            event_callback=event_callback
         )
         
     except Exception as e:
@@ -458,7 +467,7 @@ async def generate_ai_response_with_image(conversation_id, model_id, user_messag
         logger.error(traceback.format_exc())
         
         # 发送错误事件
-        await send_generation_event(conversation_id, 'generation_end', {
+        await _send_event(event_callback, conversation_id, 'generation_end', {
             'generation_id': generation_id,
             'status': 'failed',
             'error': f'图片处理失败: {str(e)}'

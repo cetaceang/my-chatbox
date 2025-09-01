@@ -15,6 +15,7 @@ urlpatterns = [
     path('api/messages/edit/', user_api.edit_message_api, name='api-edit-message'),
     path('api/messages/delete/', user_api.delete_message_api, name='api-delete-message'),
     path('api/sync_conversation/', user_api.sync_conversation_api, name='api-sync-conversation'),
+    path('api/http_chat/', user_api.http_chat_view, name='api_http_chat'),
     # API接口 - Admin/Management
     path('api/models/', admin_api.get_models_api, name='api-models'),
     path('api/providers/', admin_api.manage_providers_api, name='api-providers'),
@@ -25,7 +26,7 @@ urlpatterns = [
     path('api/admin/manage_user_ban/', admin_api.manage_user_ban_status, name='api-admin-manage-user-ban'),
     path('api/admin/set_admin_status/', admin_api.set_admin_status, name='api-admin-set-admin-status'),
     path('api/admin/delete_user/', admin_api.delete_user_api, name='api-admin-delete-user'), # 新增：删除用户
-    path('api/debug/', admin_api.debug_api_response, name='api-debug'),
+    path('api/debug_response/', admin_api.debug_api_response, name='api-debug-response'),
 
     # WebSocket测试（保留）
     path('test_ws/', pages.ws_test, name='ws-test'), # Moved to pages.py
