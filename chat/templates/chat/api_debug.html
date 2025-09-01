@@ -111,16 +111,18 @@ document.addEventListener('DOMContentLoaded', function() {
         // 构建请求数据
         const requestData = {
             provider_id: providerId,
-            model_name: modelName,
-            messages: [
-                {
-                    role: "user",
-                    content: messageContent
-                }
-            ],
-            temperature: temperature,
-            max_tokens: maxTokens,
-            stream: streamMode
+            payload: {
+                model: modelName,
+                messages: [
+                    {
+                        role: "user",
+                        content: messageContent
+                    }
+                ],
+                temperature: temperature,
+                max_tokens: maxTokens,
+                stream: streamMode
+            }
         };
         
         // 更新状态
@@ -245,4 +247,4 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 </script>
-{% endblock %} 
+{% endblock %}

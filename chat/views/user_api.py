@@ -376,15 +376,21 @@ from django.http import StreamingHttpResponse
 from chat.services import generate_ai_response
 import asyncio
 import uuid
+from channels.db import database_sync_to_async
 
-# 异步辅助函数，用于在同步视图中运行异步代码
-def run_async(coro):
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+# --- 为视图准备的异步数据库操作 ---
+
+@database_sync_to_async
+def create_user_message(conversation_id, user, content, model_id):
+    """异步创建用户消息"""
+    conversation = get_object_or_404(Conversation, id=conversation_id, user=user)
+    user_message = Message.objects.create(
+        conversation=conversation,
+        content=content,
+        is_user=True,
+        model_used_id=model_id
+    )
+    return user_message.id
 
 async def collect_events(generator):
     """异步地从生成器中收集所有项目。"""
@@ -393,9 +399,9 @@ async def collect_events(generator):
 @login_required
 @csrf_exempt
 @require_http_methods(["POST"])
-def http_chat_view(request):
+async def http_chat_view(request):
     """
-    处理HTTP回退的聊天请求，统一支持流式和非流式响应。
+    处理HTTP回退的聊天请求，统一支持流式和非流式响应 (异步视图)。
     """
     try:
         data = json.loads(request.body)
@@ -411,20 +417,17 @@ def http_chat_view(request):
             return HttpResponseBadRequest("Missing required parameters (model_id, message/is_regenerate)")
 
         if not is_regenerate:
-            conversation = get_object_or_404(Conversation, id=conversation_id, user=request.user)
-            user_message = Message.objects.create(
-                conversation=conversation,
-                content=message_content,
-                is_user=True,
-                model_used_id=model_id
+            # 使用异步辅助函数创建消息
+            user_message_id = await create_user_message(
+                conversation_id, request.user, message_content, model_id
             )
-            user_message_id = user_message.id
         
         async def event_generator():
             event_queue = asyncio.Queue()
             async def callback(event_type, data):
                 await event_queue.put({'type': event_type, 'data': data})
 
+            # 在异步视图中，可以直接创建任务
             asyncio.create_task(
                 generate_ai_response(
                     conversation_id=conversation_id,
@@ -439,7 +442,11 @@ def http_chat_view(request):
             )
             while True:
                 try:
-                    event = await asyncio.wait_for(event_queue.get(), 320)
+                    # 使用 asyncio.timeout。320秒的设置是为了匹配 services.py 中的 AI_REQUEST_TIMEOUT (300秒)
+                    # 并为其提供20秒的额外缓冲时间，这与WebSocket的处理逻辑保持一致。
+                    async with asyncio.timeout(320):
+                        event = await event_queue.get()
+                    
                     yield event
                     if event['type'] == 'generation_end':
                         break
@@ -458,7 +465,8 @@ def http_chat_view(request):
             response['Cache-Control'] = 'no-cache'
             return response
         else:
-            events = run_async(collect_events(event_generator()))
+            # 在异步视图中，可以直接 await
+            events = await collect_events(event_generator())
             
             final_content = ""
             message_id = None
