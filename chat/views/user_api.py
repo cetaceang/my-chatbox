@@ -376,8 +376,6 @@ from django.http import StreamingHttpResponse
 from chat.services import generate_ai_response_for_http
 from chat.state_utils import set_stop_requested_sync
 import uuid
-import asyncio
-import time
 
 
 @login_required
@@ -544,71 +542,51 @@ def http_chat_view(request):
             response['Cache-Control'] = 'no-cache'
             return response
         else:
-            # --- 非流式响应处理（带心跳） ---
-            async def non_streaming_heartbeat_generator():
-                # 在后台线程中运行同步的、阻塞的函数
-                task = asyncio.create_task(asyncio.to_thread(generate_ai_response_for_http, **service_kwargs))
-                
-                while not task.done():
-                    # 每5秒发送一个心跳信号
-                    yield "event: heartbeat\ndata: {}\n\n"
-                    await asyncio.sleep(5)
+            # --- 非流式响应处理 ---
+            result = generate_ai_response_for_http(**service_kwargs)
+            status = result.get('status')
 
-                # 获取最终结果
-                result = await task
-                status = result.get('status')
-                logger.info(f"HTTP Service: Non-stream (with heartbeat) for GenID {generation_id} finished with status: {status}")
+            logger.info(f"HTTP Service: Non-stream for GenID {generation_id} finished with status: {status}")
 
-                final_event_data = {}
-                if status == 'completed':
-                    try:
-                        full_content = result.get('content', '')
-                        conversation = await asyncio.to_thread(get_object_or_404, Conversation, id=conversation_id)
-                        model = await asyncio.to_thread(get_object_or_404, AIModel, id=model_id)
+            if status == 'completed':
+                try:
+                    full_content = result.get('content', '')
+                    conversation = get_object_or_404(Conversation, id=conversation_id)
+                    model = get_object_or_404(AIModel, id=model_id)
 
-                        if is_regenerate:
-                            user_message = await asyncio.to_thread(get_object_or_404, Message, id=user_message_id)
-                            # 注意：Django ORM 的 delete 操作是同步的
-                            await asyncio.to_thread(
-                                Message.objects.filter(conversation_id=conversation_id, is_user=False, timestamp__gt=user_message.timestamp).delete
-                            )
+                    if is_regenerate:
+                        user_message = get_object_or_404(Message, id=user_message_id)
+                        Message.objects.filter(conversation_id=conversation_id, is_user=False, timestamp__gt=user_message.timestamp).delete()
 
-                        # create 和 save 也是同步的
-                        ai_message = await asyncio.to_thread(
-                            Message.objects.create,
-                            conversation=conversation, content=full_content, is_user=False, model_used=model, generation_id=generation_id
-                        )
-                        await asyncio.to_thread(conversation.save)
-                        
-                        final_event_data = {
-                            'status': 'completed',
-                            'content': full_content,
-                            'message_id': ai_message.id,
-                            'generation_id': generation_id,
-                        }
-                    except Exception as db_error:
-                        logger.error(f"Error during DB ops for non-stream GenID {generation_id}: {db_error}", exc_info=True)
-                        final_event_data = {'status': 'failed', 'error': f'数据库操作失败: {db_error}', 'generation_id': generation_id}
-                
-                elif status == 'cancelled':
-                    final_event_data = {
-                        'status': 'cancelled',
-                        'message': '生成已由用户取消。',
+                    ai_message = Message.objects.create(
+                        conversation=conversation, content=full_content, is_user=False, model_used=model, generation_id=generation_id
+                    )
+                    conversation.save()
+                    
+                    return JsonResponse({
+                        'success': True,
+                        'content': full_content,
+                        'message_id': ai_message.id,
                         'generation_id': generation_id,
-                    }
-                else: # failed 或其他状态
-                    final_event_data = {
-                        'status': 'failed',
-                        'error': result.get('error', '未知错误'),
-                        'generation_id': generation_id,
-                    }
-                
-                # 发送最后一个包含所有数据的事件
-                yield f"event: generation_end\ndata: {json.dumps(final_event_data)}\n\n"
+                    })
+                except Exception as db_error:
+                    logger.error(f"Error during DB ops for non-stream GenID {generation_id}: {db_error}", exc_info=True)
+                    return JsonResponse({'success': False, 'error': f'数据库操作失败: {db_error}', 'generation_id': generation_id}, status=500)
+            
+            elif status == 'cancelled':
+                return JsonResponse({
+                    'success': True, # 请求本身是成功的
+                    'status': 'cancelled',
+                    'message': '生成已由用户取消。',
+                    'generation_id': generation_id,
+                })
 
-            response = StreamingHttpResponse(non_streaming_heartbeat_generator(), content_type='text/event-stream')
-            response['Cache-Control'] = 'no-cache'
-            return response
+            else: # failed 或其他状态
+                return JsonResponse({
+                    'success': False,
+                    'error': result.get('error', '未知错误'),
+                    'generation_id': generation_id,
+                }, status=500)
 
     except json.JSONDecodeError:
         return HttpResponseBadRequest("Invalid JSON format")
