@@ -399,12 +399,12 @@ async def collect_events(generator):
 @login_required
 @csrf_exempt
 @require_http_methods(["POST"])
-async def http_chat_view(request):
+def http_chat_view(request):
     """
-    处理HTTP回退的聊天请求，统一支持流式和非流式响应 (异步视图)。
+    处理HTTP回退的聊天请求，统一支持流式和非流式响应 (现在是同步视图)。
     现在支持 application/json 和 multipart/form-data。
     """
-    try:
+    async def _async_logic():
         content_type = request.content_type
         is_image_upload = 'multipart/form-data' in content_type
 
@@ -431,7 +431,6 @@ async def http_chat_view(request):
 
         # --- 2. 创建用户消息 ---
         if not is_regenerate:
-            # 对于图片上传，即使没有文本，也创建一个消息占位符
             display_content = message_content if message_content.strip() else ('[图片上传]' if file else '')
             user_message_id = await create_user_message(
                 conversation_id, request.user, display_content, model_id
@@ -467,7 +466,7 @@ async def http_chat_view(request):
                 })
                 asyncio.create_task(generate_ai_response_with_image(**task_kwargs))
             else:
-                task_kwargs['message'] = message_content # For regenerate
+                task_kwargs['message'] = message_content
                 asyncio.create_task(generate_ai_response(**task_kwargs))
 
             while True:
@@ -524,6 +523,8 @@ async def http_chat_view(request):
                     'generation_id': generation_id,
                 }, status=500)
 
+    try:
+        return asyncio.run(_async_logic())
     except json.JSONDecodeError:
         return HttpResponseBadRequest("Invalid JSON format")
     except Exception as e:
