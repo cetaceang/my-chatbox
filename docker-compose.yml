@@ -15,11 +15,6 @@ services:
       - ./media_data:/app/media
     env_file:
       - .env.docker
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=2
-      - DJANGO_SETTINGS_MODULE=config.settings
     networks:
       - shared-net
     command: >

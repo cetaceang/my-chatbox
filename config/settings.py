@@ -185,6 +185,31 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Channels配置
 ASGI_APPLICATION = 'config.asgi.application'
 
+# Dynamic Cache Configuration
+CACHE_TYPE = os.getenv('CACHE_TYPE', 'memory')
+
+if CACHE_TYPE == 'redis':
+    REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
+    REDIS_PORT = os.getenv('REDIS_PORT', '6379')
+    REDIS_DB = os.getenv('REDIS_DB', '2')
+    
+    CACHES = {
+        "default": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}",
+            "OPTIONS": {
+                "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            }
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'unique-snowflake',
+        }
+    }
+
 # Dynamic Channel Layer Configuration
 REDIS_HOST = os.getenv('REDIS_HOST')
 

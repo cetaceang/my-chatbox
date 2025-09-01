@@ -566,6 +566,7 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
     - 支持文本和图片上传。
     - 支持流式和非流式响应。
     """
+    logger.info(f"HTTP Service: Starting generation with ID {generation_id} for conversation {conversation_id}")
     final_status = "unknown"
     error_detail = "An unknown error occurred."
     full_content = ""
@@ -587,6 +588,7 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
                 else:
                     msg_to_update.content = f"[file:{saved_path}]"
                 msg_to_update.save()
+                logger.info(f"HTTP Service: Updated user message {user_message_id} with file reference: {saved_path}")
             except Exception as e:
                 raise ValueError(f"File upload processing failed: {e}")
 
@@ -594,6 +596,7 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
         messages_for_api = _prepare_history_messages_sync(
             conversation.id, conversation.system_prompt, model, user_message_id, is_regenerate
         )
+        logger.info(f"HTTP Service: Prepared {len(messages_for_api)} messages for API request. GenID: {generation_id}")
 
         # 2. 构建并发送AI请求
         request_data = {
@@ -606,10 +609,10 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {model['provider_api_key']}"}
 
         response = requests.post(
-            api_url, 
-            json=request_data, 
-            headers=headers, 
-            stream=is_streaming, 
+            api_url,
+            json=request_data,
+            headers=headers,
+            stream=is_streaming,
             timeout=AI_REQUEST_TIMEOUT
         )
         response.raise_for_status()
@@ -635,9 +638,10 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
                                     logger.warning(f"Could not decode stream chunk: {chunk_data}")
                     final_status = "completed"
                 except Exception as e:
+                    logger.error(f"Error during streaming response for GenID {generation_id}: {e}", exc_info=True)
                     final_status = "failed"
                     error_detail = f"流式响应处理失败: {e}"
-                
+
                 yield {'type': 'generation_end', 'data': {'status': final_status, 'error': error_detail if final_status == 'failed' else None, 'generation_id': generation_id}}
 
             return stream_generator()
@@ -649,13 +653,18 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
             else:
                 final_status = "failed"
                 error_detail = "Non-streaming response contained no content."
+                logger.error(f"Non-streaming AI response for GenID {generation_id} completed but no content was extracted.")
 
     except requests.exceptions.RequestException as e:
+        logger.error(f"HTTP request to AI API failed for GenID {generation_id}: {e}", exc_info=True)
         final_status = "failed"
         error_detail = f"AI服务请求失败: {e}"
     except Exception as e:
+        logger.error(f"Error in generate_ai_response_for_http for GenID {generation_id}: {e}", exc_info=True)
         final_status = "failed"
         error_detail = f"服务器内部错误: {e}"
+    finally:
+        logger.info(f"HTTP Service: Generation {generation_id} for conversation {conversation_id} finished with status: {final_status}")
 
     # 3. 保存消息并返回结果 (对非流式或流式结束时)
     if final_status == "completed":
@@ -666,7 +675,8 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
                 is_user=False,
                 timestamp__gt=user_message.timestamp
             ).delete()
-        
+            logger.info(f"HTTP Service: Deleted subsequent AI messages for regeneration. GenID: {generation_id}")
+
         ai_message = Message.objects.create(
             conversation=conversation,
             content=full_content,
@@ -675,6 +685,7 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
         )
         conversation.save()
         ai_message_id = ai_message.id
+        logger.info(f"HTTP Service: Saved AI message {ai_message_id} to conversation {conversation_id}. GenID: {generation_id}")
 
     # 仅为非流式模式返回字典
     if not is_streaming:
