@@ -567,13 +567,9 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
     为同步的HTTP视图生成AI回复。
     - 使用 `requests` 库进行同步API调用。
     - 支持文本和图片上传。
-    - 支持流式和非流式响应。
+    - 根据 is_streaming 返回事件生成器或结果字典。
     """
     logger.info(f"HTTP Service: Starting generation with ID {generation_id} for conversation {conversation_id}")
-    final_status = "unknown"
-    error_detail = "An unknown error occurred."
-    full_content = ""
-    ai_message_id = None
 
     try:
         conversation = get_object_or_404(Conversation, id=conversation_id)
@@ -581,32 +577,7 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
         if not model:
             raise ValueError("AI model not found.")
 
-        # --- 重新生成逻辑修复 (HTTP) ---
-        # 在HTTP重新生成时，传入的 `user_message_id` 实际上是 AI 消息的 `generation_id` (UUID)。
-        # 我们需要用它找到对应的用户消息的真实数据库ID (int)，以便后续操作能正确执行。
-        if is_regenerate:
-            try:
-                # 传入的 user_message_id 是 AI 消息的 generation_id
-                ai_message_to_regenerate = Message.objects.get(generation_id=user_message_id, is_user=False)
-                
-                # 找到这条AI消息之前的最新一条用户消息
-                user_message = Message.objects.filter(
-                    conversation_id=conversation_id,
-                    is_user=True,
-                    timestamp__lt=ai_message_to_regenerate.timestamp
-                ).latest('timestamp')
-                
-                # 用真实的用户消息数据库ID (int) 覆盖掉传入的UUID
-                user_message_id = user_message.id
-                logger.info(f"HTTP Service: Regeneration - resolved user message ID to {user_message_id} from generation_id.")
-            except (Message.DoesNotExist, Message.MultipleObjectsReturned) as e:
-                logger.error(f"HTTP Service: Could not find a unique message to regenerate from using generation_id {user_message_id}. Error: {e}")
-                raise ValueError("Invalid message reference for regeneration.") from e
-            except Exception as e: # 捕获其他可能的错误，例如传入的ID格式不正确
-                logger.error(f"HTTP Service: An unexpected error occurred during regeneration ID resolution. Input was '{user_message_id}'. Error: {e}")
-                raise ValueError("Invalid ID format for regeneration.") from e
-
-        # --- 处理文件上传 ---
+        # --- 文件上传处理 ---
         if file_data and file_name and user_message_id:
             try:
                 saved_path = default_storage.save(f"uploads/{generation_id}_{file_name}", ContentFile(file_data))
@@ -640,37 +611,33 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
             api_url,
             json=request_data,
             headers=headers,
-            stream=is_streaming,
+            stream=is_streaming, # 根据请求类型设置stream
             timeout=AI_REQUEST_TIMEOUT
         )
         response.raise_for_status()
 
         if is_streaming:
-            def stream_generator():
-                nonlocal full_content, final_status, error_detail
+            # --- 流式响应：返回事件生成器 ---
+            def event_generator():
+                full_content = ""
+                final_status = "unknown"
+                error_detail = None
                 try:
                     last_heartbeat_time = time.time()
-                    HEARTBEAT_INTERVAL = 15  # 每15秒进行一次心跳
-
+                    HEARTBEAT_INTERVAL = 15
                     for line in response.iter_lines():
-                        # 心跳逻辑：定期延长停止信号的TTL
                         current_time = time.time()
                         if current_time - last_heartbeat_time > HEARTBEAT_INTERVAL:
                             touch_stop_request_sync(generation_id)
                             last_heartbeat_time = current_time
-
-                        # 检查停止信号
                         if get_stop_requested_sync(generation_id):
-                            logger.warning(f"HTTP Service: Stop request detected for GenID {generation_id}. Stopping stream.")
                             final_status = "cancelled"
                             break
-
                         if line:
                             line_str = line.decode('utf-8').strip()
                             if line_str.startswith('data: '):
                                 chunk_data = line_str[6:]
-                                if chunk_data == '[DONE]':
-                                    continue
+                                if chunk_data == '[DONE]': continue
                                 try:
                                     chunk_json = json.loads(chunk_data)
                                     content_piece = extract_content_from_chunk(chunk_json)
@@ -679,73 +646,41 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
                                         yield {'type': 'stream_update', 'data': {'content': content_piece, 'generation_id': generation_id}}
                                 except json.JSONDecodeError:
                                     logger.warning(f"Could not decode stream chunk: {chunk_data}")
-                    
-                    if final_status not in ["cancelled", "failed"]:
+                    if final_status != "cancelled":
                         final_status = "completed" if full_content else "failed"
-
+                        if final_status == "failed": error_detail = "No content received from AI."
+                except requests.exceptions.RequestException as e:
+                    final_status, error_detail = "failed", f"AI服务请求失败: {e}"
                 except Exception as e:
-                    logger.error(f"Error during streaming response for GenID {generation_id}: {e}", exc_info=True)
-                    final_status = "failed"
-                    error_detail = f"流式响应处理失败: {e}"
-
-                # The generator returns its final state. The view will handle it.
-                return {
-                    'status': final_status,
-                    'content': full_content,
-                    'error': error_detail if final_status == 'failed' else None
-                }
-
-            return stream_generator()
+                    final_status, error_detail = "failed", f"流式响应处理失败: {e}"
+                
+                end_event_data = {'status': final_status, 'generation_id': generation_id, 'full_content': full_content}
+                if error_detail: end_event_data['error'] = error_detail
+                yield {'type': 'generation_end', 'data': end_event_data}
+            return event_generator()
         else:
+            # --- 非流式响应：返回结果字典 ---
             response_json = response.json()
             full_content = extract_content_from_chunk(response_json)
             if full_content:
-                final_status = "completed"
+                return {'status': 'completed', 'content': full_content}
             else:
-                final_status = "failed"
-                error_detail = "Non-streaming response contained no content."
                 logger.error(f"Non-streaming AI response for GenID {generation_id} completed but no content was extracted.")
+                return {'status': 'failed', 'error': 'Non-streaming response contained no content.'}
 
     except requests.exceptions.RequestException as e:
         logger.error(f"HTTP request to AI API failed for GenID {generation_id}: {e}", exc_info=True)
-        final_status = "failed"
         error_detail = f"AI服务请求失败: {e}"
+        if is_streaming:
+            def error_generator(): yield {'type': 'generation_end', 'data': {'status': 'failed', 'error': error_detail, 'generation_id': generation_id}}
+            return error_generator()
+        else:
+            return {'status': 'failed', 'error': error_detail}
     except Exception as e:
         logger.error(f"Error in generate_ai_response_for_http for GenID {generation_id}: {e}", exc_info=True)
-        final_status = "failed"
         error_detail = f"服务器内部错误: {e}"
-    finally:
-        # For streaming responses, the status is finalized in the view after the generator is consumed.
-        if not is_streaming:
-            logger.info(f"HTTP Service: Generation {generation_id} for conversation {conversation_id} finished with status: {final_status}")
-
-    # For streaming, the function has already returned the generator.
-    # The following logic is ONLY for the non-streaming case.
-    if not is_streaming:
-        if final_status == "completed":
-            if is_regenerate:
-                user_message = get_object_or_404(Message, id=user_message_id)
-                Message.objects.filter(
-                    conversation_id=conversation_id,
-                    is_user=False,
-                    timestamp__gt=user_message.timestamp
-                ).delete()
-                logger.info(f"HTTP Service: Deleted subsequent AI messages for regeneration. GenID: {generation_id}")
-
-            ai_message = Message.objects.create(
-                conversation=conversation,
-                content=full_content,
-                is_user=False,
-                model_used_id=model['id'],
-                generation_id=generation_id
-            )
-            conversation.save()
-            ai_message_id = ai_message.id
-            logger.info(f"HTTP Service: Saved AI message {ai_message_id} to conversation {conversation_id}. GenID: {generation_id}")
-
-        return {
-            'status': final_status,
-            'content': full_content,
-            'message_id': ai_message_id,
-            'error': error_detail if final_status == 'failed' else None
-        }
+        if is_streaming:
+            def error_generator(): yield {'type': 'generation_end', 'data': {'status': 'failed', 'error': error_detail, 'generation_id': generation_id}}
+            return error_generator()
+        else:
+            return {'status': 'failed', 'error': error_detail}

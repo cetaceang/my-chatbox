@@ -411,6 +411,28 @@ def http_chat_view(request):
         if not model_id or (not message_content and not is_regenerate and not file):
             return HttpResponseBadRequest("Missing required parameters")
 
+        # --- 新增：在视图层面对齐WS的重新生成逻辑 ---
+        if is_regenerate:
+            try:
+                # 尝试将 message_id 视为 UUID
+                uuid.UUID(user_message_id)
+                # 如果成功，说明是 generation_id，需要解析出真正的用户消息ID
+                ai_message_to_regenerate = get_object_or_404(Message, generation_id=user_message_id, is_user=False)
+                user_message = Message.objects.filter(
+                    conversation_id=conversation_id,
+                    is_user=True,
+                    timestamp__lt=ai_message_to_regenerate.timestamp
+                ).latest('timestamp')
+                user_message_id = user_message.id # 覆盖为正确的整数ID
+                logger.info(f"HTTP View: Regenerate - Resolved user message ID to {user_message_id} from generation_id.")
+            except (ValueError, TypeError, AttributeError):
+                # 如果不是有效的UUID，就假定它已经是正确的整数ID
+                logger.info(f"HTTP View: Regenerate - Using provided user message ID {user_message_id} as integer.")
+                pass # 保持 user_message_id 不变
+            except Message.DoesNotExist:
+                 return HttpResponseBadRequest("Could not find a valid message to regenerate from.")
+
+
         # --- 2. 创建用户消息 (同步) ---
         if not is_regenerate:
             conversation = get_object_or_404(Conversation, id=conversation_id, user=request.user)
@@ -442,93 +464,86 @@ def http_chat_view(request):
 
         # --- 4. 根据流式或非流式返回响应 ---
         if is_streaming:
-            # 服务函数返回一个生成器
-            stream_generator = generate_ai_response_for_http(**service_kwargs)
-            
-            def sse_stream_wrapper():
-                """包装器，用于处理SSE事件格式化和流结束后的数据库操作"""
-                final_result = None
-                try:
-                    # 迭代生成器，yield 数据块
-                    for event in stream_generator:
-                        sse_event = f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
-                        yield sse_event
-                except StopIteration as e:
-                    # 当生成器耗尽时，从 StopIteration 的 value 属性中捕获返回值
-                    final_result = e.value
-                except Exception as e:
-                    logger.error(f"Error consuming stream generator: {e}", exc_info=True)
-                    final_result = {'status': 'failed', 'error': str(e)}
+            event_generator = generate_ai_response_for_http(**service_kwargs)
 
-                # 在生成器完全耗尽后，根据返回的结果执行数据库操作和发送最终事件
-                if final_result and final_result.get('status') == 'completed':
-                    # --- 成功路径 ---
-                    full_content = final_result.get('content', '')
-                    conversation = get_object_or_404(Conversation, id=conversation_id)
-                    model = get_object_or_404(AIModel, id=model_id)
-                    
-                    if is_regenerate:
-                        user_message = Message.objects.filter(generation_id=generation_id, is_user=True).first()
-                        if not user_message:
-                            user_message = get_object_or_404(Message, id=user_message_id) # Fallback
+            def sse_stream_wrapper(generator):
+                final_event_data = None
+                for event in generator:
+                    if event['type'] == 'generation_end':
+                        final_event_data = event['data']
+                        break
+                    sse_event = f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
+                    yield sse_event
+
+                if not final_event_data:
+                    final_event_data = {'status': 'failed', 'error': 'Stream ended unexpectedly.', 'generation_id': generation_id}
+
+                status = final_event_data.get('status')
+                if status == 'completed':
+                    try:
+                        full_content = final_event_data.get('full_content', '')
+                        conversation = get_object_or_404(Conversation, id=conversation_id)
+                        model = get_object_or_404(AIModel, id=model_id)
+                        if is_regenerate:
+                            user_message = get_object_or_404(Message, id=user_message_id)
+                            Message.objects.filter(conversation_id=conversation_id, is_user=False, timestamp__gt=user_message.timestamp).delete()
                         
-                        Message.objects.filter(
-                            conversation_id=conversation_id,
-                            is_user=False,
-                            timestamp__gt=user_message.timestamp
-                        ).delete()
-                    
-                    ai_message = Message.objects.create(
-                        conversation=conversation,
-                        content=full_content,
-                        is_user=False,
-                        model_used=model,
-                        generation_id=generation_id
-                    )
-                    conversation.save() # 更新 updated_at
-                    
-                    # 1. 发送ID更新事件
-                    id_update_event = {
-                        'type': 'id_update',
-                        'data': {'generation_id': generation_id, 'message_id': ai_message.id, 'temp_id': generation_id}
-                    }
-                    yield f"event: {id_update_event['type']}\ndata: {json.dumps(id_update_event['data'])}\n\n"
-                    
-                    # 2. 发送成功的结束事件
-                    end_event_data = {'status': 'completed', 'generation_id': generation_id}
-                    yield f"event: generation_end\ndata: {json.dumps(end_event_data)}\n\n"
-                    logger.info(f"HTTP Service: Stream for GenID {generation_id} finished with status: completed")
+                        ai_message = Message.objects.create(
+                            conversation=conversation, content=full_content, is_user=False, model_used=model, generation_id=generation_id
+                        )
+                        conversation.save()
 
+                        id_update_data = {'generation_id': generation_id, 'message_id': ai_message.id, 'temp_id': generation_id}
+                        yield f"event: id_update\ndata: {json.dumps(id_update_data)}\n\n"
+                        
+                        end_event_data = {'status': 'completed', 'generation_id': generation_id}
+                        yield f"event: generation_end\ndata: {json.dumps(end_event_data)}\n\n"
+                        logger.info(f"HTTP Service: Stream for GenID {generation_id} finished and saved with status: completed")
+                    except Exception as db_error:
+                        logger.error(f"Error during DB ops for GenID {generation_id}: {db_error}", exc_info=True)
+                        error_end_data = {'status': 'failed', 'error': f'数据库操作失败: {db_error}', 'generation_id': generation_id}
+                        yield f"event: generation_end\ndata: {json.dumps(error_end_data)}\n\n"
                 else:
-                    # --- 失败路径 ---
-                    status = final_result.get('status', 'failed') if final_result else 'failed'
-                    error = final_result.get('error') if final_result else 'Stream ended unexpectedly.'
-                    end_event_data = {
-                        'status': status,
-                        'error': error,
-                        'generation_id': generation_id
-                    }
-                    yield f"event: generation_end\ndata: {json.dumps(end_event_data)}\n\n"
+                    yield f"event: generation_end\ndata: {json.dumps(final_event_data)}\n\n"
                     logger.info(f"HTTP Service: Stream for GenID {generation_id} finished with status: {status}")
 
-            response = StreamingHttpResponse(sse_stream_wrapper(), content_type='text/event-stream')
+            response = StreamingHttpResponse(sse_stream_wrapper(event_generator), content_type='text/event-stream')
             response['Cache-Control'] = 'no-cache'
             return response
         else:
-            # 服务函数返回一个字典
+            # --- 非流式响应处理 ---
             result = generate_ai_response_for_http(**service_kwargs)
             
-            if result['status'] == 'completed':
-                return JsonResponse({
-                    'success': True,
-                    'content': result['content'],
-                    'message_id': result['message_id'],
-                    'generation_id': generation_id,
-                })
+            if result.get('status') == 'completed':
+                try:
+                    full_content = result.get('content', '')
+                    conversation = get_object_or_404(Conversation, id=conversation_id)
+                    model = get_object_or_404(AIModel, id=model_id)
+
+                    if is_regenerate:
+                        user_message = get_object_or_404(Message, id=user_message_id)
+                        Message.objects.filter(conversation_id=conversation_id, is_user=False, timestamp__gt=user_message.timestamp).delete()
+
+                    ai_message = Message.objects.create(
+                        conversation=conversation, content=full_content, is_user=False, model_used=model, generation_id=generation_id
+                    )
+                    conversation.save()
+                    
+                    logger.info(f"HTTP Service: Non-stream for GenID {generation_id} finished and saved with status: completed")
+                    return JsonResponse({
+                        'success': True,
+                        'content': full_content,
+                        'message_id': ai_message.id,
+                        'generation_id': generation_id,
+                    })
+                except Exception as db_error:
+                    logger.error(f"Error during DB ops for non-stream GenID {generation_id}: {db_error}", exc_info=True)
+                    return JsonResponse({'success': False, 'error': f'数据库操作失败: {db_error}', 'generation_id': generation_id}, status=500)
             else:
+                logger.info(f"HTTP Service: Non-stream for GenID {generation_id} finished with status: {result.get('status', 'failed')}")
                 return JsonResponse({
                     'success': False,
-                    'error': result['error'],
+                    'error': result.get('error', '未知错误'),
                     'generation_id': generation_id,
                 }, status=500)
 
