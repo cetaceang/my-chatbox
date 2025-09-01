@@ -19,7 +19,7 @@ from .models import Conversation, Message, AIModel
 from .state_utils import get_stop_requested_sync, set_stop_requested_sync, clear_stop_request_sync, touch_stop_request_sync
 # --- Import response handlers ---
 from .response_handlers import extract_response_content, ResponseExtractionError
-from .services import generate_ai_response, generate_ai_response_with_image # 导入新的服务函数
+from .services import generate_ai_response
 import asyncio # 导入 asyncio
 
 logger = logging.getLogger(__name__)
@@ -240,19 +240,20 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     'user_message_id': user_message['id']
                 }))
 
-                # 调用图片处理服务 - 使用generation_id作为temp_id（与纯文本发送保持一致）
+                # 调用统一的服务函数处理图片上传
                 asyncio.create_task(
-                    generate_ai_response_with_image(
+                    generate_ai_response(
                         conversation_id=self.conversation_id,
                         model_id=model_id,
                         user_message_id=user_message['id'],
-                        generation_id=generation_id,
-                        temp_id=generation_id,  # 关键修复：使用generation_id作为temp_id
                         message=message,
+                        is_regenerate=False,
+                        generation_id=generation_id,
+                        temp_id=generation_id,
+                        is_streaming=is_streaming,
                         file_data=file_data,
                         file_name=file_name,
-                        file_type=file_type,
-                        is_streaming=is_streaming
+                        file_type=file_type
                     )
                 )
             
@@ -498,54 +499,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
         }))
         logger.info(f"Consumer {self.channel_name}: Forwarded 'generation_start' to client for GenID {generation_id}")
     # --- END: Handle generation_start ---
-
-    async def handle_image_upload_async(self, conversation_id, model_id, user_message_id, generation_id, temp_id, message, file_data, file_name, file_type, is_streaming):
-        """处理图片上传的异步方法"""
-        import base64
-        import tempfile
-        import os
-        from .services import generate_ai_response_with_image
-        
-        try:
-            logger.info(f"开始处理图片上传: ConvID={conversation_id}, GenID={generation_id}")
-            
-            # 解码Base64文件数据
-            try:
-                file_content = base64.b64decode(file_data)
-            except Exception as e:
-                logger.error(f"解码Base64文件数据失败: {e}")
-                await self.send_error("文件数据格式错误")
-                return
-            
-            # 创建临时文件
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_type.split('/')[-1]}") as temp_file:
-                temp_file.write(file_content)
-                temp_file_path = temp_file.name
-            
-            try:
-                # 调用图片处理服务
-                await generate_ai_response_with_image(
-                    conversation_id=conversation_id,
-                    model_id=model_id,
-                    user_message_id=user_message_id,
-                    generation_id=generation_id,
-                    temp_id=temp_id,
-                    message=message,
-                    image_path=temp_file_path,
-                    is_streaming=is_streaming
-                )
-            finally:
-                # 清理临时文件
-                try:
-                    os.unlink(temp_file_path)
-                except Exception as e:
-                    logger.warning(f"清理临时文件失败: {e}")
-                    
-        except Exception as e:
-            logger.error(f"处理图片上传时出错: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            await self.send_error(f"图片处理失败: {str(e)}")
 
     @database_sync_to_async
     def delete_ai_message(self, message_id):
