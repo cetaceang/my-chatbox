@@ -9,6 +9,7 @@ import re
 import mimetypes
 import os
 from asgiref.sync import async_to_sync
+from channels.db import database_sync_to_async
 from channels.layers import get_channel_layer
 from django.shortcuts import get_object_or_404
 from django.core.files.storage import default_storage
