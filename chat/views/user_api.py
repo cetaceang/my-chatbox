@@ -460,14 +460,14 @@ def http_chat_view(request):
                     logger.error(f"Error consuming stream generator: {e}", exc_info=True)
                     final_result = {'status': 'failed', 'error': str(e)}
 
-                # 在生成器完全耗尽后，根据返回的结果执行数据库操作
+                # 在生成器完全耗尽后，根据返回的结果执行数据库操作和发送最终事件
                 if final_result and final_result.get('status') == 'completed':
+                    # --- 成功路径 ---
                     full_content = final_result.get('content', '')
                     conversation = get_object_or_404(Conversation, id=conversation_id)
                     model = get_object_or_404(AIModel, id=model_id)
                     
                     if is_regenerate:
-                        # 使用 generation_id 查找原始用户消息
                         user_message = Message.objects.filter(generation_id=generation_id, is_user=True).first()
                         if not user_message:
                             user_message = get_object_or_404(Message, id=user_message_id) # Fallback
@@ -487,21 +487,29 @@ def http_chat_view(request):
                     )
                     conversation.save() # 更新 updated_at
                     
-                    # 发送ID更新事件
+                    # 1. 发送ID更新事件
                     id_update_event = {
                         'type': 'id_update',
                         'data': {'generation_id': generation_id, 'message_id': ai_message.id, 'temp_id': generation_id}
                     }
                     yield f"event: {id_update_event['type']}\ndata: {json.dumps(id_update_event['data'])}\n\n"
-                
-                # 无论成功与否，最后都发送一个结束事件
-                end_event_data = {
-                    'status': final_result.get('status', 'failed') if final_result else 'failed',
-                    'error': final_result.get('error') if final_result else 'Stream ended unexpectedly.',
-                    'generation_id': generation_id
-                }
-                yield f"event: generation_end\ndata: {json.dumps(end_event_data)}\n\n"
-                logger.info(f"HTTP Service: Stream for GenID {generation_id} finished with status: {end_event_data['status']}")
+                    
+                    # 2. 发送成功的结束事件
+                    end_event_data = {'status': 'completed', 'generation_id': generation_id}
+                    yield f"event: generation_end\ndata: {json.dumps(end_event_data)}\n\n"
+                    logger.info(f"HTTP Service: Stream for GenID {generation_id} finished with status: completed")
+
+                else:
+                    # --- 失败路径 ---
+                    status = final_result.get('status', 'failed') if final_result else 'failed'
+                    error = final_result.get('error') if final_result else 'Stream ended unexpectedly.'
+                    end_event_data = {
+                        'status': status,
+                        'error': error,
+                        'generation_id': generation_id
+                    }
+                    yield f"event: generation_end\ndata: {json.dumps(end_event_data)}\n\n"
+                    logger.info(f"HTTP Service: Stream for GenID {generation_id} finished with status: {status}")
 
             response = StreamingHttpResponse(sse_stream_wrapper(), content_type='text/event-stream')
             response['Cache-Control'] = 'no-cache'

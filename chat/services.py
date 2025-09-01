@@ -490,11 +490,8 @@ def _get_model_sync(model_id):
 def _prepare_history_messages_sync(conversation_id, system_prompt, model, user_message_id, is_regenerate, generation_id=None):
     """同步准备API请求的消息历史，支持多模态"""
     if is_regenerate:
-        # 优先使用 generation_id 查找用户消息，提供更可靠的重新生成机制
-        user_message = Message.objects.filter(generation_id=generation_id, is_user=True).first()
-        if not user_message:
-            # 如果找不到，回退到使用 message_id，以兼容旧数据或不同流程
-            user_message = get_object_or_404(Message, id=user_message_id)
+        # 与异步版本逻辑对齐：直接使用 user_message_id (必须是整数) 查找用户消息
+        user_message = get_object_or_404(Message, id=user_message_id)
 
         history_qs = Message.objects.filter(
             conversation_id=conversation_id,
@@ -584,6 +581,31 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
         if not model:
             raise ValueError("AI model not found.")
 
+        # --- 重新生成逻辑修复 (HTTP) ---
+        # 在HTTP重新生成时，传入的 `user_message_id` 实际上是 AI 消息的 `generation_id` (UUID)。
+        # 我们需要用它找到对应的用户消息的真实数据库ID (int)，以便后续操作能正确执行。
+        if is_regenerate:
+            try:
+                # 传入的 user_message_id 是 AI 消息的 generation_id
+                ai_message_to_regenerate = Message.objects.get(generation_id=user_message_id, is_user=False)
+                
+                # 找到这条AI消息之前的最新一条用户消息
+                user_message = Message.objects.filter(
+                    conversation_id=conversation_id,
+                    is_user=True,
+                    timestamp__lt=ai_message_to_regenerate.timestamp
+                ).latest('timestamp')
+                
+                # 用真实的用户消息数据库ID (int) 覆盖掉传入的UUID
+                user_message_id = user_message.id
+                logger.info(f"HTTP Service: Regeneration - resolved user message ID to {user_message_id} from generation_id.")
+            except (Message.DoesNotExist, Message.MultipleObjectsReturned) as e:
+                logger.error(f"HTTP Service: Could not find a unique message to regenerate from using generation_id {user_message_id}. Error: {e}")
+                raise ValueError("Invalid message reference for regeneration.") from e
+            except Exception as e: # 捕获其他可能的错误，例如传入的ID格式不正确
+                logger.error(f"HTTP Service: An unexpected error occurred during regeneration ID resolution. Input was '{user_message_id}'. Error: {e}")
+                raise ValueError("Invalid ID format for regeneration.") from e
+
         # --- 处理文件上传 ---
         if file_data and file_name and user_message_id:
             try:
@@ -659,7 +681,7 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
                                     logger.warning(f"Could not decode stream chunk: {chunk_data}")
                     
                     if final_status not in ["cancelled", "failed"]:
-                        final_status = "completed"
+                        final_status = "completed" if full_content else "failed"
 
                 except Exception as e:
                     logger.error(f"Error during streaming response for GenID {generation_id}: {e}", exc_info=True)
