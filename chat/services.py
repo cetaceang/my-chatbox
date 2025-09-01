@@ -285,8 +285,11 @@ def prepare_history_messages(conversation, model, user_message_id, is_regenerate
     else:
         history_qs = Message.objects.filter(conversation_id=conversation['id']).order_by('timestamp')
 
-    if history_qs.count() > model['max_history_messages']:
-        history_qs = history_qs[history_qs.count() - model['max_history_messages']:]
+    # 预先获取所有消息到列表中，避免在异步上下文中对QuerySet进行多次操作
+    history_messages = list(history_qs)
+
+    if len(history_messages) > model['max_history_messages']:
+        history_messages = history_messages[-model['max_history_messages']:]
 
     messages = []
     if conversation.get('system_prompt'):
@@ -298,7 +301,7 @@ def prepare_history_messages(conversation, model, user_message_id, is_regenerate
     
     # 1. 识别所有候选图片消息
     all_image_message_ids = [
-        msg.id for msg in history_qs 
+        msg.id for msg in history_messages
         if msg.is_user and re.search(r'\[file:(.*?)\]', msg.content)
     ]
     
@@ -310,7 +313,7 @@ def prepare_history_messages(conversation, model, user_message_id, is_regenerate
         latest_image_ids_to_include = set(all_image_message_ids[-MAX_IMAGES_IN_CONTEXT:])
     
     # 3. 一次性构建最终消息列表
-    for msg in history_qs:
+    for msg in history_messages:
         role = "user" if msg.is_user else "assistant"
         
         if msg.id in latest_image_ids_to_include:
