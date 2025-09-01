@@ -19,7 +19,7 @@ services:
       - shared-net
     command: >
       sh -c "python manage.py migrate &&
-             daphne -b 0.0.0.0 -p 3000 config.asgi:application"
+             daphne -b 0.0.0.0 -p 3000 --thread-pool-size 50 config.asgi:application"
 
 networks:
   shared-net:
