@@ -373,44 +373,28 @@ def sync_conversation_api(request):
 
 
 from django.http import StreamingHttpResponse
-from chat.services import stream_ai_response # 导入新的服务函数
-import asyncio
+from chat.services import generate_ai_response_for_http
 import uuid
-from channels.db import database_sync_to_async
-import base64 # 导入 base64
-
-# --- 为视图准备的异步数据库操作 ---
-
-@database_sync_to_async
-def create_user_message(conversation_id, user, content, model_id):
-    """异步创建用户消息"""
-    conversation = get_object_or_404(Conversation, id=conversation_id, user=user)
-    user_message = Message.objects.create(
-        conversation=conversation,
-        content=content,
-        is_user=True,
-        model_used_id=model_id
-    )
-    return user_message.id
 
 @login_required
 @csrf_exempt
 @require_http_methods(["POST"])
-async def http_chat_view(request):
+def http_chat_view(request):
     """
-    处理HTTP回退的聊天请求，使用异步生成器来简化流式响应。
+    处理HTTP回退的聊天请求（同步视图）。
     支持 application/json 和 multipart/form-data。
+    支持流式和非流式响应。
     """
     try:
-        # --- 1. 解析请求数据 ---
         content_type = request.content_type
         is_image_upload = 'multipart/form-data' in content_type
 
+        # --- 1. 解析请求数据 ---
         if is_image_upload:
             data = request.POST
             file = request.FILES.get('file')
             if not file:
-                return HttpResponseBadRequest("在 multipart/form-data 请求中缺少文件")
+                return HttpResponseBadRequest("Missing file in multipart/form-data request")
         else:
             data = json.loads(request.body)
             file = None
@@ -424,81 +408,107 @@ async def http_chat_view(request):
         generation_id = data.get('generation_id', str(uuid.uuid4()))
 
         if not model_id or (not message_content and not is_regenerate and not file):
-            return HttpResponseBadRequest("缺少必要的参数")
+            return HttpResponseBadRequest("Missing required parameters")
 
-        # --- 2. 创建用户消息（如果不是重新生成） ---
+        # --- 2. 创建用户消息 (同步) ---
         if not is_regenerate:
+            conversation = get_object_or_404(Conversation, id=conversation_id, user=request.user)
             display_content = message_content if message_content.strip() else ('[图片上传]' if file else '')
-            user_message_id = await create_user_message(
-                conversation_id, request.user, display_content, model_id
+            user_message = Message.objects.create(
+                conversation=conversation,
+                content=display_content,
+                is_user=True,
+                model_used_id=model_id
             )
+            user_message_id = user_message.id
 
         # --- 3. 准备服务函数参数 ---
         service_kwargs = {
             'conversation_id': conversation_id,
             'model_id': model_id,
-            'message': message_content,
+            'message_content': message_content,
             'user_message_id': user_message_id,
             'is_regenerate': is_regenerate,
             'generation_id': generation_id,
-            'temp_id': generation_id, # 在HTTP视图中，temp_id与generation_id相同
             'is_streaming': is_streaming,
         }
-
         if is_image_upload and file:
-            file_data_b64 = base64.b64encode(file.read()).decode('utf-8')
             service_kwargs.update({
-                'file_data': file_data_b64,
+                'file_data': file.read(),
                 'file_name': file.name,
-                'file_type': file.content_type,
             })
 
-        # --- 4. 调用服务并返回响应 ---
+        # --- 4. 根据流式或非流式返回响应 ---
         if is_streaming:
-            # 定义一个内部的SSE流生成器
-            async def sse_stream():
-                # 直接迭代新的异步生成器服务函数
-                async for event_type, event_data in stream_ai_response(**service_kwargs):
-                    sse_event = f"event: {event_type}\ndata: {json.dumps(event_data)}\n\n"
-                    yield sse_event
+            # 服务函数返回一个生成器
+            stream_generator = generate_ai_response_for_http(**service_kwargs)
             
-            response = StreamingHttpResponse(sse_stream(), content_type='text/event-stream')
+            def sse_stream_wrapper():
+                """包装器，用于处理SSE事件格式化和流结束后的数据库操作"""
+                final_result = {}
+                full_content = ""
+
+                for event in stream_generator:
+                    # 格式化并发送SSE事件
+                    sse_event = f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
+                    yield sse_event
+                    
+                    # 收集数据以备后用
+                    if event['type'] == 'stream_update':
+                        full_content += event['data'].get('content', '')
+                    elif event['type'] == 'generation_end':
+                        final_result = event['data']
+
+                # 流结束后，执行数据库操作
+                if final_result.get('status') == 'completed':
+                    conversation = get_object_or_404(Conversation, id=conversation_id)
+                    model = get_object_or_404(AIModel, id=model_id)
+                    if is_regenerate:
+                        user_message = get_object_or_404(Message, id=user_message_id)
+                        Message.objects.filter(
+                            conversation_id=conversation_id,
+                            is_user=False,
+                            timestamp__gt=user_message.timestamp
+                        ).delete()
+                    
+                    ai_message = Message.objects.create(
+                        conversation=conversation,
+                        content=full_content,
+                        is_user=False,
+                        model_used=model
+                    )
+                    conversation.save() # 更新 updated_at
+                    
+                    # 发送ID更新事件
+                    id_update_event = {
+                        'type': 'id_update',
+                        'data': {'generation_id': generation_id, 'message_id': ai_message.id}
+                    }
+                    yield f"event: {id_update_event['type']}\ndata: {json.dumps(id_update_event['data'])}\n\n"
+
+            response = StreamingHttpResponse(sse_stream_wrapper(), content_type='text/event-stream')
             response['Cache-Control'] = 'no-cache'
             return response
         else:
-            # 非流式：收集所有事件然后一次性返回
-            final_content = ""
-            message_id = None
-            final_status = "failed"
-            error_message = "未知错误"
-
-            # 异步迭代生成器
-            async for event_type, event_data in stream_ai_response(**service_kwargs):
-                if event_type == 'full_message':
-                    final_content = event_data.get('content', '')
-                if event_type == 'id_update':
-                    message_id = event_data.get('message_id')
-                if event_type == 'generation_end':
-                    final_status = event_data.get('status')
-                    if final_status == 'failed':
-                        error_message = event_data.get('error', error_message)
-
-            if final_status == 'completed':
+            # 服务函数返回一个字典
+            result = generate_ai_response_for_http(**service_kwargs)
+            
+            if result['status'] == 'completed':
                 return JsonResponse({
                     'success': True,
-                    'content': final_content,
-                    'message_id': message_id,
+                    'content': result['content'],
+                    'message_id': result['message_id'],
                     'generation_id': generation_id,
                 })
             else:
                 return JsonResponse({
                     'success': False,
-                    'error': error_message,
+                    'error': result['error'],
                     'generation_id': generation_id,
                 }, status=500)
 
     except json.JSONDecodeError:
-        return HttpResponseBadRequest("无效的JSON格式")
+        return HttpResponseBadRequest("Invalid JSON format")
     except Exception as e:
-        logger.error(f"HTTP聊天视图出错: {e}", exc_info=True)
+        logger.error(f"HTTP chat view error: {e}", exc_info=True)
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
