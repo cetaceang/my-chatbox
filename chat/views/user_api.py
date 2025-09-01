@@ -402,9 +402,10 @@ def http_chat_view(request):
         conversation_id = data.get('conversation_id')
         model_id = data.get('model_id')
         message_content = data.get('message', '')
-        is_regenerate = data.get('is_regenerate', 'false').lower() == 'true'
+        # Handle boolean from JSON or string from form data
+        is_regenerate = str(data.get('is_regenerate', False)).lower() == 'true'
         user_message_id = data.get('message_id')
-        is_streaming = data.get('is_streaming', 'true').lower() == 'true'
+        is_streaming = str(data.get('is_streaming', True)).lower() == 'true'
         generation_id = data.get('generation_id', str(uuid.uuid4()))
 
         if not model_id or (not message_content and not is_regenerate and not file):
