@@ -179,6 +179,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     generate_ai_response(
                         conversation_id=self.conversation_id,
                         model_id=model_id,
+                        message=message,
                         user_message_id=user_message['id'],
                         is_regenerate=False,
                         generation_id=generation_id,
@@ -206,7 +207,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         is_regenerate=True,
                         generation_id=generation_id,
                         temp_id=generation_id, # temp_id is the same as generation_id
-                        is_streaming=is_streaming
+                        is_streaming=is_streaming,
+                        message=None # For regenerate, no new message is passed
                     )
                 )
                 # --- END CORE CHANGE ---

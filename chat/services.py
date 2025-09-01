@@ -30,7 +30,7 @@ async def _send_event(callback, conversation_id, event_type, data):
         await send_generation_event(conversation_id, event_type, data)
 
 
-async def generate_ai_response(conversation_id, model_id, message, user_message_id=None, is_regenerate=False, generation_id=None, temp_id=None, is_streaming=True, event_callback=None, file_data=None, file_name=None, file_type=None):
+async def generate_ai_response(conversation_id, model_id, message=None, user_message_id=None, is_regenerate=False, generation_id=None, temp_id=None, is_streaming=True, event_callback=None, file_data=None, file_name=None, file_type=None):
     """
     核心服务函数，用于生成AI回复。
     - 支持流式和非流式两种模式。
@@ -78,7 +78,8 @@ async def generate_ai_response(conversation_id, model_id, message, user_message_
                         logger.error(f"无法找到用户消息 {msg_id} 来更新")
                         raise
                 
-                await _update_db_message(user_message_id, message, saved_path)
+                # 当 message 为 None 时，使用空字符串
+                await _update_db_message(user_message_id, message or "", saved_path)
             except Exception as e:
                 logger.error(f"图片处理失败: {e}", exc_info=True)
                 await _send_event(event_callback, conversation_id, 'generation_end', {
