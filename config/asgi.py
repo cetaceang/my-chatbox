@@ -21,10 +21,11 @@ from channels.auth import AuthMiddlewareStack
 import chat.routing  # 在Django初始化后导入
 
 application = ProtocolTypeRouter({
-    "http": get_asgi_application(), # Use the standard Django ASGI app
+    "http": get_asgi_application(),
     "websocket": AuthMiddlewareStack(
         URLRouter(
             chat.routing.websocket_urlpatterns
         )
     ),
+    "lifespan": get_asgi_application(),  # 添加这行来处理lifespan协议
 })

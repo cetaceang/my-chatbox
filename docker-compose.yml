@@ -19,7 +19,7 @@ services:
       - shared-net
     command: >
       sh -c "python manage.py migrate &&
-               gunicorn config.asgi:application --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:3000 --access-logfile - --error-logfile - --log-level info --lifespan off"
+               gunicorn config.asgi:application --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:3000 --access-logfile - --error-logfile - --log-level info"
 
 networks:
   shared-net:
