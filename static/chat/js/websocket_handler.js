@@ -385,13 +385,13 @@ async function sendHttpRequestFallback(type, payload, settings) { // settings ca
                     const eventTypeMatch = eventString.match(/event: (.*)/);
                     const eventDataMatch = eventString.match(/data: (.*)/);
                     if (eventTypeMatch && eventDataMatch) {
-                        let eventType = eventTypeMatch[1];
+                        const eventType = eventTypeMatch[1];
                         const eventData = JSON.parse(eventDataMatch[1]);
 
-                        // 将后端HTTP流的事件类型 'message_chunk' 映射到前端WS处理器期望的 'stream_update'
-                        if (eventType === 'message_chunk') {
-                            console.log("[HTTP Fallback] Translating 'message_chunk' to 'stream_update'");
-                            eventType = 'stream_update';
+                        // 关键修复：如果HTTP流事件数据中缺少temp_id，则从父函数作用域注入它
+                        if (eventType === 'stream_update' && !eventData.temp_id) {
+                            console.log(`[HTTP Fallback] Injecting missing temp_id '${tempId}' into stream_update event.`);
+                            eventData.temp_id = tempId;
                         }
 
                         const eventPayload = { type: eventType, data: eventData };
