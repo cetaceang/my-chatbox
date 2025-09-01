@@ -380,9 +380,8 @@ from channels.db import database_sync_to_async
 
 # --- 为视图准备的异步数据库操作 ---
 
-@database_sync_to_async
 def create_user_message(conversation_id, user, content, model_id):
-    """异步创建用户消息"""
+    """同步创建用户消息"""
     conversation = get_object_or_404(Conversation, id=conversation_id, user=user)
     user_message = Message.objects.create(
         conversation=conversation,
@@ -399,12 +398,12 @@ async def collect_events(generator):
 @login_required
 @csrf_exempt
 @require_http_methods(["POST"])
-def http_chat_view(request):
+async def http_chat_view(request):
     """
-    处理HTTP回退的聊天请求，统一支持流式和非流式响应 (现在是同步视图)。
+    处理HTTP回退的聊天请求，统一支持流式和非流式响应 (异步视图)。
     现在支持 application/json 和 multipart/form-data。
     """
-    async def _async_logic():
+    try:
         content_type = request.content_type
         is_image_upload = 'multipart/form-data' in content_type
 
@@ -432,7 +431,7 @@ def http_chat_view(request):
         # --- 2. 创建用户消息 ---
         if not is_regenerate:
             display_content = message_content if message_content.strip() else ('[图片上传]' if file else '')
-            user_message_id = await create_user_message(
+            user_message_id = await database_sync_to_async(create_user_message, thread_sensitive=True)(
                 conversation_id, request.user, display_content, model_id
             )
 
@@ -523,8 +522,6 @@ def http_chat_view(request):
                     'generation_id': generation_id,
                 }, status=500)
 
-    try:
-        return asyncio.run(_async_logic())
     except json.JSONDecodeError:
         return HttpResponseBadRequest("Invalid JSON format")
     except Exception as e:
