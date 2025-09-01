@@ -547,7 +547,7 @@ def http_chat_view(request):
             # --- 非流式响应处理（带心跳） ---
             async def non_streaming_heartbeat_generator():
                 # 在后台线程中运行同步的、阻塞的函数
-                task = asyncio.to_thread(generate_ai_response_for_http, **service_kwargs)
+                task = asyncio.create_task(asyncio.to_thread(generate_ai_response_for_http, **service_kwargs))
                 
                 while not task.done():
                     # 每5秒发送一个心跳信号
