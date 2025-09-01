@@ -243,20 +243,11 @@ function handleGenerationRequest({ generationId, message, modelId, isRegenerate,
         });
     } else {
         // Existing conversation, send message through the already open WebSocket.
-        const sentViaWebSocket = isRegenerate
-            ? sendWebSocketRegenerate(userMessageId, modelId, generationId)
-            : sendWebSocketMessage(message, modelId, generationId);
-
-        // Fallback to HTTP API if WebSocket fails (should be rare now)
-        if (!sentViaWebSocket) {
-            console.warn("WebSocket not available for an existing conversation, falling back to HTTP API.");
-            sendChatMessageAPI(
-                message,
-                modelId,
-                generationId, // Pass generationId as the temp_id for API fallback
-                isRegenerate,
-                isRegenerate ? userMessageId : null
-            );
+        // The websocket_handler now contains the HTTP fallback logic, so no extra check is needed here.
+        if (isRegenerate) {
+            sendWebSocketRegenerate(userMessageId, modelId, generationId);
+        } else {
+            sendWebSocketMessage(message, modelId, generationId);
         }
     }
 }

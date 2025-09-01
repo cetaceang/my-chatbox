@@ -402,51 +402,78 @@ async def collect_events(generator):
 async def http_chat_view(request):
     """
     处理HTTP回退的聊天请求，统一支持流式和非流式响应 (异步视图)。
+    现在支持 application/json 和 multipart/form-data。
     """
     try:
-        data = json.loads(request.body)
+        content_type = request.content_type
+        is_image_upload = 'multipart/form-data' in content_type
+
+        # --- 1. 解析请求数据 ---
+        if is_image_upload:
+            data = request.POST
+            file = request.FILES.get('file')
+            if not file:
+                return HttpResponseBadRequest("Missing file in multipart/form-data request")
+        else:
+            data = json.loads(request.body)
+            file = None
+
         conversation_id = data.get('conversation_id')
         model_id = data.get('model_id')
-        message_content = data.get('message')
-        is_regenerate = data.get('is_regenerate', False)
+        message_content = data.get('message', '')
+        is_regenerate = data.get('is_regenerate', 'false').lower() == 'true'
         user_message_id = data.get('message_id')
-        is_streaming = data.get('is_streaming', True)
+        is_streaming = data.get('is_streaming', 'true').lower() == 'true'
         generation_id = data.get('generation_id', str(uuid.uuid4()))
 
-        if not model_id or (not message_content and not is_regenerate):
-            return HttpResponseBadRequest("Missing required parameters (model_id, message/is_regenerate)")
+        if not model_id or (not message_content and not is_regenerate and not file):
+            return HttpResponseBadRequest("Missing required parameters")
 
+        # --- 2. 创建用户消息 ---
         if not is_regenerate:
-            # 使用异步辅助函数创建消息
+            # 对于图片上传，即使没有文本，也创建一个消息占位符
+            display_content = message_content if message_content.strip() else ('[图片上传]' if file else '')
             user_message_id = await create_user_message(
-                conversation_id, request.user, message_content, model_id
+                conversation_id, request.user, display_content, model_id
             )
-        
+
+        # --- 3. 定义事件生成器 ---
         async def event_generator():
             event_queue = asyncio.Queue()
             async def callback(event_type, data):
                 await event_queue.put({'type': event_type, 'data': data})
 
-            # 在异步视图中，可以直接创建任务
-            asyncio.create_task(
-                generate_ai_response(
-                    conversation_id=conversation_id,
-                    model_id=model_id,
-                    user_message_id=user_message_id,
-                    is_regenerate=is_regenerate,
-                    generation_id=generation_id,
-                    temp_id=generation_id,
-                    is_streaming=is_streaming,
-                    event_callback=callback
-                )
-            )
+            task_kwargs = {
+                'conversation_id': conversation_id,
+                'model_id': model_id,
+                'user_message_id': user_message_id,
+                'is_regenerate': is_regenerate,
+                'generation_id': generation_id,
+                'temp_id': generation_id,
+                'is_streaming': is_streaming,
+                'event_callback': callback
+            }
+
+            if is_image_upload and file:
+                import base64
+                from chat.services import generate_ai_response_with_image
+                
+                file_data_b64 = base64.b64encode(file.read()).decode('utf-8')
+                task_kwargs.update({
+                    'message': message_content,
+                    'file_data': file_data_b64,
+                    'file_name': file.name,
+                    'file_type': file.content_type,
+                })
+                asyncio.create_task(generate_ai_response_with_image(**task_kwargs))
+            else:
+                task_kwargs['message'] = message_content # For regenerate
+                asyncio.create_task(generate_ai_response(**task_kwargs))
+
             while True:
                 try:
-                    # 使用 asyncio.timeout。320秒的设置是为了匹配 services.py 中的 AI_REQUEST_TIMEOUT (300秒)
-                    # 并为其提供20秒的额外缓冲时间，这与WebSocket的处理逻辑保持一致。
                     async with asyncio.timeout(320):
                         event = await event_queue.get()
-                    
                     yield event
                     if event['type'] == 'generation_end':
                         break
@@ -455,6 +482,7 @@ async def http_chat_view(request):
                     yield {'type': 'generation_end', 'data': {'status': 'failed', 'error': '服务器处理超时'}}
                     break
         
+        # --- 4. 根据流式或非流式返回响应 ---
         if is_streaming:
             async def sse_stream():
                 async for event in event_generator():
@@ -465,7 +493,6 @@ async def http_chat_view(request):
             response['Cache-Control'] = 'no-cache'
             return response
         else:
-            # 在异步视图中，可以直接 await
             events = await collect_events(event_generator())
             
             final_content = ""

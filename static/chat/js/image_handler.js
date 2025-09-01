@@ -1,5 +1,5 @@
 /* eslint-env browser */
-/* globals getCookie, storeConversationId, refreshConversationList, renderMessageContent */
+/* globals getCookie, storeConversationId, refreshConversationList, renderMessageContent, sendWebSocketRequest, getChatSettings, initWebSocket */
 
 // =========================================================================
 // 图片上传通用处理函数 - 使用WebSocket统一逻辑
@@ -80,61 +80,11 @@ function handleImageUpload(file, { tempId, generationId }) {
 
         console.log(`[ImageHandler] 通过WebSocket发送图片上传消息`);
         
-        // 检查WebSocket连接状态
-        if (!window.chatSocket || window.chatSocket.readyState !== WebSocket.OPEN) {
-            console.error('[ImageHandler] WebSocket未连接，无法发送图片');
-            
-            // 显示错误信息
-            const errorDiv = document.createElement('div');
-            errorDiv.className = 'alert alert-danger mt-2';
-            errorDiv.innerHTML = '<strong>连接错误:</strong> WebSocket连接已断开，请刷新页面重试。';
-            userMessageDiv.after(errorDiv);
-            
-            // 移除加载指示器
-            if (loadingDiv) {
-                loadingDiv.remove();
-            }
-            
-            // 重置状态管理器
-            if (window.ChatStateManager) {
-                window.ChatStateManager.completeGeneration(generationId);
-            }
-            
-            return;
-        }
-
-        // 如果没有会话ID，需要初始化WebSocket连接
-        if (!window.ChatStateManager.getState().currentConversationId) {
-            console.log("[ImageHandler] 没有会话ID，初始化WebSocket连接");
-            initWebSocket({
-                isNewConversation: true,
-                initialMessage: websocketMessage
-            });
-        } else {
-            // 直接发送消息
-            try {
-                window.chatSocket.send(JSON.stringify(websocketMessage));
-                console.log(`[ImageHandler] 图片上传消息已发送`);
-            } catch (error) {
-                console.error('[ImageHandler] 发送WebSocket消息失败:', error);
-                
-                // 显示错误信息
-                const errorDiv = document.createElement('div');
-                errorDiv.className = 'alert alert-danger mt-2';
-                errorDiv.innerHTML = `<strong>发送失败:</strong> ${error.message}`;
-                userMessageDiv.after(errorDiv);
-                
-                // 移除加载指示器
-                if (loadingDiv) {
-                    loadingDiv.remove();
-                }
-                
-                // 重置状态管理器
-                if (window.ChatStateManager) {
-                    window.ChatStateManager.completeGeneration(generationId);
-                }
-            }
-        }
+        // 使用 sendWebSocketRequest 统一发送，它内置了HTTP回退逻辑
+        sendWebSocketRequest('image_upload', {
+            ...websocketMessage,
+            file: file // 将原始文件对象传递给回退逻辑
+        });
     };
 
     reader.onerror = function(error) {

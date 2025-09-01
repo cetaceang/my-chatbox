@@ -453,7 +453,7 @@ async def generate_ai_response_with_image(conversation_id, model_id, user_messag
         await update_user_message_with_file(user_message_id, message, saved_path)
         
         # 3. 调用标准的AI响应生成函数
-        await generate_ai_response(
+        asyncio.create_task(generate_ai_response(
             conversation_id=conversation_id,
             model_id=model_id,
             user_message_id=user_message_id,
@@ -462,7 +462,7 @@ async def generate_ai_response_with_image(conversation_id, model_id, user_messag
             temp_id=temp_id,
             is_streaming=is_streaming,
             event_callback=event_callback
-        )
+        ))
         
     except Exception as e:
         logger.error(f"图片AI响应生成失败: {e}")

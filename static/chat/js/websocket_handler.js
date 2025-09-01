@@ -318,16 +318,37 @@ async function sendHttpRequestFallback(type, payload, settings) { // settings ca
         return;
     }
 
-    // 准备请求体
-    const requestBody = {
-        conversation_id: conversationId,
-        model_id: payload.model_id,
-        message: payload.message,
-        is_regenerate: type === 'regenerate',
-        message_id: payload.message_id,
-        is_streaming: currentSettings.isStreaming,
-        generation_id: payload.generation_id,
+    // --- 动态准备请求体和头部 ---
+    let requestBody;
+    const headers = {
+        'X-CSRFToken': getCookie('csrftoken'),
+        // 'Content-Type' 将由浏览器根据请求体自动设置
     };
+
+    if (type === 'image_upload' && payload.file) {
+        // 如果是图片上传，使用 FormData
+        requestBody = new FormData();
+        requestBody.append('conversation_id', conversationId);
+        requestBody.append('model_id', payload.model_id);
+        requestBody.append('message', payload.message);
+        requestBody.append('is_regenerate', false); // 图片上传总是新消息
+        requestBody.append('is_streaming', currentSettings.isStreaming);
+        requestBody.append('generation_id', payload.generation_id);
+        requestBody.append('file', payload.file, payload.file_name); // 添加文件
+    } else {
+        // 对于其他请求，使用 JSON
+        headers['Content-Type'] = 'application/json';
+        requestBody = JSON.stringify({
+            conversation_id: conversationId,
+            model_id: payload.model_id,
+            message: payload.message,
+            is_regenerate: type === 'regenerate',
+            message_id: payload.message_id,
+            is_streaming: currentSettings.isStreaming,
+            generation_id: payload.generation_id,
+        });
+    }
+    // --- 结束动态准备 ---
 
     const tempId = payload.temp_id || payload.generation_id;
     if (tempId) {
@@ -337,11 +358,8 @@ async function sendHttpRequestFallback(type, payload, settings) { // settings ca
     try {
         const response = await fetch('/chat/api/http_chat/', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': getCookie('csrftoken'),
-            },
-            body: JSON.stringify(requestBody),
+            headers: headers,
+            body: requestBody,
         });
 
         if (!response.ok) {
@@ -473,3 +491,5 @@ function sendWebSocketRegenerate(userMessageId, modelId, tempId) {
         generation_id: tempId,
     });
 }
+
+window.sendWebSocketRequest = sendWebSocketRequest;

@@ -156,26 +156,8 @@ document.addEventListener('DOMContentLoaded', function() {
                     responseEl.textContent = `流式响应预览 (共 ${preview.length} 行):\n\n`;
                     responseEl.textContent += preview.join('\n');
 
-                    // 尝试从流式响应中提取内容
-                    let extractedContent = "无法从流中提取最终内容";
-                    try {
-                        // 这是一个简化的提取逻辑，假设最后一条非控制消息是最终结果
-                        for (let i = preview.length - 1; i >= 0; i--) {
-                            const line = preview[i];
-                            if (line.startsWith('data:')) {
-                                const jsonStr = line.substring(5).trim();
-                                if (jsonStr === '[DONE]') continue;
-                                const chunkData = JSON.parse(jsonStr);
-                                if (chunkData.choices && chunkData.choices[0].delta && chunkData.choices[0].delta.content) {
-                                     // 这是一个不完整的示例，实际提取需要拼接所有 delta
-                                     extractedContent = "流式内容预览... (完整提取逻辑复杂)";
-                                     break;
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        console.error("解析流式响应失败", e);
-                    }
+                    // 复用项目中的完整提取逻辑
+                    const extractedContent = extractStreamContent(preview);
                     extractedEl.textContent = extractedContent;
 
                 } else {
@@ -244,6 +226,29 @@ document.addEventListener('DOMContentLoaded', function() {
         } catch (e) {
             console.error('提取消息内容时出错:', e);
             return null;
+        }
+    }
+
+    // 新增：从流式预览中提取完整内容的函数
+    function extractStreamContent(streamPreview) {
+        let fullContent = '';
+        try {
+            streamPreview.forEach(line => {
+                if (line.startsWith('data:')) {
+                    const jsonStr = line.substring(5).trim();
+                    if (jsonStr === '[DONE]') {
+                        return;
+                    }
+                    const chunkData = JSON.parse(jsonStr);
+                    if (chunkData.choices && chunkData.choices[0].delta && chunkData.choices[0].delta.content) {
+                        fullContent += chunkData.choices[0].delta.content;
+                    }
+                }
+            });
+            return fullContent || "未能从流数据中提取任何内容。";
+        } catch (e) {
+            console.error('解析流式响应失败:', e);
+            return `解析流数据时出错: ${e.message}`;
         }
     }
     
