@@ -63,8 +63,5 @@ class BanCheckMiddleware:
                     else:
                         return HttpResponseForbidden("<h1>访问被禁止</h1><p>您的账户已被封禁。</p>")
 
-        if self.is_async:
-            response = await self.get_response(request)
-        else:
-            response = self.get_response(request)
+        response = await self.get_response(request)
         return response
