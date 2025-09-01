@@ -373,10 +373,11 @@ def sync_conversation_api(request):
 
 
 from django.http import StreamingHttpResponse
-from chat.services import generate_ai_response
+from chat.services import stream_ai_response # 导入新的服务函数
 import asyncio
 import uuid
 from channels.db import database_sync_to_async
+import base64 # 导入 base64
 
 # --- 为视图准备的异步数据库操作 ---
 
@@ -392,28 +393,24 @@ def create_user_message(conversation_id, user, content, model_id):
     )
     return user_message.id
 
-async def collect_events(generator):
-    """异步地从生成器中收集所有项目。"""
-    return [item async for item in generator]
-
 @login_required
 @csrf_exempt
 @require_http_methods(["POST"])
 async def http_chat_view(request):
     """
-    处理HTTP回退的聊天请求，统一支持流式和非流式响应 (异步视图)。
-    现在支持 application/json 和 multipart/form-data。
+    处理HTTP回退的聊天请求，使用异步生成器来简化流式响应。
+    支持 application/json 和 multipart/form-data。
     """
     try:
+        # --- 1. 解析请求数据 ---
         content_type = request.content_type
         is_image_upload = 'multipart/form-data' in content_type
 
-        # --- 1. 解析请求数据 ---
         if is_image_upload:
             data = request.POST
             file = request.FILES.get('file')
             if not file:
-                return HttpResponseBadRequest("Missing file in multipart/form-data request")
+                return HttpResponseBadRequest("在 multipart/form-data 请求中缺少文件")
         else:
             data = json.loads(request.body)
             file = None
@@ -427,85 +424,64 @@ async def http_chat_view(request):
         generation_id = data.get('generation_id', str(uuid.uuid4()))
 
         if not model_id or (not message_content and not is_regenerate and not file):
-            return HttpResponseBadRequest("Missing required parameters")
+            return HttpResponseBadRequest("缺少必要的参数")
 
-        # --- 2. 创建用户消息 ---
+        # --- 2. 创建用户消息（如果不是重新生成） ---
         if not is_regenerate:
-            # 对于图片上传，即使没有文本，也创建一个消息占位符
             display_content = message_content if message_content.strip() else ('[图片上传]' if file else '')
             user_message_id = await create_user_message(
                 conversation_id, request.user, display_content, model_id
             )
 
-        # --- 3. 定义事件生成器 ---
-        async def event_generator():
-            event_queue = asyncio.Queue()
-            async def callback(event_type, data):
-                await event_queue.put({'type': event_type, 'data': data})
+        # --- 3. 准备服务函数参数 ---
+        service_kwargs = {
+            'conversation_id': conversation_id,
+            'model_id': model_id,
+            'message': message_content,
+            'user_message_id': user_message_id,
+            'is_regenerate': is_regenerate,
+            'generation_id': generation_id,
+            'temp_id': generation_id, # 在HTTP视图中，temp_id与generation_id相同
+            'is_streaming': is_streaming,
+        }
 
-            task_kwargs = {
-                'conversation_id': conversation_id,
-                'model_id': model_id,
-                'message': message_content,
-                'user_message_id': user_message_id,
-                'is_regenerate': is_regenerate,
-                'generation_id': generation_id,
-                'temp_id': generation_id,
-                'is_streaming': is_streaming,
-                'event_callback': callback,
-            }
+        if is_image_upload and file:
+            file_data_b64 = base64.b64encode(file.read()).decode('utf-8')
+            service_kwargs.update({
+                'file_data': file_data_b64,
+                'file_name': file.name,
+                'file_type': file.content_type,
+            })
 
-            if is_image_upload and file:
-                import base64
-                file_data_b64 = base64.b64encode(file.read()).decode('utf-8')
-                task_kwargs.update({
-                    'file_data': file_data_b64,
-                    'file_name': file.name,
-                    'file_type': file.content_type,
-                })
-
-            # 统一调用
-            asyncio.create_task(generate_ai_response(**task_kwargs))
-
-            while True:
-                try:
-                    async with asyncio.timeout(320):
-                        event = await event_queue.get()
-                    yield event
-                    if event['type'] == 'generation_end':
-                        break
-                except asyncio.TimeoutError:
-                    logger.error(f"HTTP event_generator timeout for GenID {generation_id}")
-                    yield {'type': 'generation_end', 'data': {'status': 'failed', 'error': '服务器处理超时'}}
-                    break
-        
-        # --- 4. 根据流式或非流式返回响应 ---
+        # --- 4. 调用服务并返回响应 ---
         if is_streaming:
+            # 定义一个内部的SSE流生成器
             async def sse_stream():
-                async for event in event_generator():
-                    sse_event = f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
+                # 直接迭代新的异步生成器服务函数
+                async for event_type, event_data in stream_ai_response(**service_kwargs):
+                    sse_event = f"event: {event_type}\ndata: {json.dumps(event_data)}\n\n"
                     yield sse_event
             
             response = StreamingHttpResponse(sse_stream(), content_type='text/event-stream')
             response['Cache-Control'] = 'no-cache'
             return response
         else:
-            events = await collect_events(event_generator())
-            
+            # 非流式：收集所有事件然后一次性返回
             final_content = ""
             message_id = None
             final_status = "failed"
-            error_message = "Unknown error"
+            error_message = "未知错误"
 
-            for event in events:
-                if event['type'] == 'full_message':
-                    final_content = event['data'].get('content', '')
-                if event['type'] == 'id_update':
-                    message_id = event['data'].get('message_id')
-                if event['type'] == 'generation_end':
-                    final_status = event['data'].get('status')
+            # 异步迭代生成器
+            async for event_type, event_data in stream_ai_response(**service_kwargs):
+                if event_type == 'full_message':
+                    final_content = event_data.get('content', '')
+                if event_type == 'id_update':
+                    message_id = event_data.get('message_id')
+                if event_type == 'generation_end':
+                    final_status = event_data.get('status')
                     if final_status == 'failed':
-                        error_message = event['data'].get('error', error_message)
+                        error_message = event_data.get('error', error_message)
 
             if final_status == 'completed':
                 return JsonResponse({
@@ -522,7 +498,7 @@ async def http_chat_view(request):
                 }, status=500)
 
     except json.JSONDecodeError:
-        return HttpResponseBadRequest("Invalid JSON format")
+        return HttpResponseBadRequest("无效的JSON格式")
     except Exception as e:
-        logger.error(f"HTTP chat view error: {e}", exc_info=True)
+        logger.error(f"HTTP聊天视图出错: {e}", exc_info=True)
         return JsonResponse({'success': False, 'error': str(e)}, status=500)

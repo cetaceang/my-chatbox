@@ -19,7 +19,7 @@ from .models import Conversation, Message, AIModel
 from .state_utils import get_stop_requested_sync, set_stop_requested_sync, clear_stop_request_sync, touch_stop_request_sync
 # --- Import response handlers ---
 from .response_handlers import extract_response_content, ResponseExtractionError
-from .services import generate_ai_response
+from .services import generate_ai_response_task
 import asyncio # 导入 asyncio
 
 logger = logging.getLogger(__name__)
@@ -175,17 +175,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 }))
 
                 # Pass the single, trusted generation_id to the service
-                asyncio.create_task(
-                    generate_ai_response(
-                        conversation_id=self.conversation_id,
-                        model_id=model_id,
+                generate_ai_response_task(
+                    conversation_id=self.conversation_id,
+                    model_id=model_id,
                         message=message,
                         user_message_id=user_message['id'],
                         is_regenerate=False,
                         generation_id=generation_id,
                         temp_id=generation_id, # temp_id is the same as generation_id
-                        is_streaming=is_streaming
-                    )
+                    is_streaming=is_streaming
                 )
 
             elif message_type == 'regenerate':
@@ -199,17 +197,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     return
                 
                 # Pass the single, trusted generation_id to the service
-                asyncio.create_task(
-                    generate_ai_response(
-                        conversation_id=self.conversation_id,
-                        model_id=model_id,
+                generate_ai_response_task(
+                    conversation_id=self.conversation_id,
+                    model_id=model_id,
                         user_message_id=message_id,
                         is_regenerate=True,
                         generation_id=generation_id,
                         temp_id=generation_id, # temp_id is the same as generation_id
-                        is_streaming=is_streaming,
-                        message=None # For regenerate, no new message is passed
-                    )
+                    is_streaming=is_streaming,
+                    message=None # For regenerate, no new message is passed
                 )
                 # --- END CORE CHANGE ---
 
@@ -243,10 +239,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 }))
 
                 # 调用统一的服务函数处理图片上传
-                asyncio.create_task(
-                    generate_ai_response(
-                        conversation_id=self.conversation_id,
-                        model_id=model_id,
+                generate_ai_response_task(
+                    conversation_id=self.conversation_id,
+                    model_id=model_id,
                         user_message_id=user_message['id'],
                         message=message,
                         is_regenerate=False,
@@ -254,9 +249,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         temp_id=generation_id,
                         is_streaming=is_streaming,
                         file_data=file_data,
-                        file_name=file_name,
-                        file_type=file_type
-                    )
+                    file_name=file_name,
+                    file_type=file_type
                 )
             
             else:
