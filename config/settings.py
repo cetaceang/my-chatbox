@@ -191,12 +191,12 @@ CACHE_TYPE = os.getenv('CACHE_TYPE', 'memory')
 if CACHE_TYPE == 'redis':
     REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
     REDIS_PORT = os.getenv('REDIS_PORT', '6379')
-    REDIS_DB = os.getenv('REDIS_DB', '2')
+    REDIS_DB_CACHE = os.getenv('REDIS_DB_CACHE', '2')
     
     CACHES = {
         "default": {
             "BACKEND": "django_redis.cache.RedisCache",
-            "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}",
+            "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB_CACHE}",
             "OPTIONS": {
                 "CLIENT_CLASS": "django_redis.client.DefaultClient",
             }
@@ -214,8 +214,10 @@ else:
 REDIS_HOST = os.getenv('REDIS_HOST')
 
 if REDIS_HOST:
-    # 动态构建标准的 Redis URL，将数据库编号 1 包含在内
-    redis_url = f"redis://{REDIS_HOST}:6379/1"
+    # 动态构建标准的 Redis URL，包含专用的数据库编号
+    REDIS_PORT = os.getenv('REDIS_PORT', '6379') # 确保端口一致性
+    REDIS_DB_CHANNELS = os.getenv('REDIS_DB_CHANNELS', '1')
+    redis_url = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB_CHANNELS}"
 
     CHANNEL_LAYERS = {
         "default": {
