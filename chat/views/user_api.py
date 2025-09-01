@@ -380,8 +380,9 @@ from channels.db import database_sync_to_async
 
 # --- 为视图准备的异步数据库操作 ---
 
+@database_sync_to_async
 def create_user_message(conversation_id, user, content, model_id):
-    """同步创建用户消息"""
+    """异步创建用户消息"""
     conversation = get_object_or_404(Conversation, id=conversation_id, user=user)
     user_message = Message.objects.create(
         conversation=conversation,
@@ -402,9 +403,10 @@ async def http_chat_view(request):
     处理HTTP回退的聊天请求，统一支持流式和非流式响应 (异步视图)。
     现在支持 application/json 和 multipart/form-data。
     """
+    # 检查用户认证状态
     if not request.user.is_authenticated:
-        return JsonResponse({'success': False, 'error': '用户未认证'}, status=401)
-
+        return JsonResponse({'success': False, 'error': '用户未登录'}, status=401)
+    
     try:
         content_type = request.content_type
         is_image_upload = 'multipart/form-data' in content_type
@@ -422,9 +424,9 @@ async def http_chat_view(request):
         conversation_id = data.get('conversation_id')
         model_id = data.get('model_id')
         message_content = data.get('message', '')
-        is_regenerate = str(data.get('is_regenerate', False)).lower() == 'true'
+        is_regenerate = data.get('is_regenerate', 'false').lower() == 'true'
         user_message_id = data.get('message_id')
-        is_streaming = str(data.get('is_streaming', True)).lower() == 'true'
+        is_streaming = data.get('is_streaming', 'true').lower() == 'true'
         generation_id = data.get('generation_id', str(uuid.uuid4()))
 
         if not model_id or (not message_content and not is_regenerate and not file):
@@ -432,8 +434,9 @@ async def http_chat_view(request):
 
         # --- 2. 创建用户消息 ---
         if not is_regenerate:
+            # 对于图片上传，即使没有文本，也创建一个消息占位符
             display_content = message_content if message_content.strip() else ('[图片上传]' if file else '')
-            user_message_id = await database_sync_to_async(create_user_message, thread_sensitive=True)(
+            user_message_id = await create_user_message(
                 conversation_id, request.user, display_content, model_id
             )
 
@@ -467,7 +470,7 @@ async def http_chat_view(request):
                 })
                 asyncio.create_task(generate_ai_response_with_image(**task_kwargs))
             else:
-                task_kwargs['message'] = message_content
+                task_kwargs['message'] = message_content # For regenerate
                 asyncio.create_task(generate_ai_response(**task_kwargs))
 
             while True:
