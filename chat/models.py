@@ -71,6 +71,7 @@ class Message(models.Model):
     is_user = models.BooleanField(default=True, verbose_name="是否用户消息")
     model_used = models.ForeignKey(AIModel, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="使用的模型")
     timestamp = models.DateTimeField(auto_now_add=True, verbose_name="时间戳")
+    generation_id = models.UUIDField(null=True, blank=True, help_text="与此消息相关的生成事件的唯一ID")
     
     class Meta:
         verbose_name = "消息"

@@ -419,7 +419,8 @@ def http_chat_view(request):
                 conversation=conversation,
                 content=display_content,
                 is_user=True,
-                model_used_id=model_id
+                model_used_id=model_id,
+                generation_id=generation_id  # 保存 generation_id
             )
             user_message_id = user_message.id
 
@@ -446,26 +447,31 @@ def http_chat_view(request):
             
             def sse_stream_wrapper():
                 """包装器，用于处理SSE事件格式化和流结束后的数据库操作"""
-                final_result = {}
-                full_content = ""
+                final_result = None
+                try:
+                    # 迭代生成器，yield 数据块
+                    for event in stream_generator:
+                        sse_event = f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
+                        yield sse_event
+                except StopIteration as e:
+                    # 当生成器耗尽时，从 StopIteration 的 value 属性中捕获返回值
+                    final_result = e.value
+                except Exception as e:
+                    logger.error(f"Error consuming stream generator: {e}", exc_info=True)
+                    final_result = {'status': 'failed', 'error': str(e)}
 
-                for event in stream_generator:
-                    # 格式化并发送SSE事件
-                    sse_event = f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
-                    yield sse_event
-                    
-                    # 收集数据以备后用
-                    if event['type'] == 'stream_update':
-                        full_content += event['data'].get('content', '')
-                    elif event['type'] == 'generation_end':
-                        final_result = event['data']
-
-                # 流结束后，执行数据库操作
-                if final_result.get('status') == 'completed':
+                # 在生成器完全耗尽后，根据返回的结果执行数据库操作
+                if final_result and final_result.get('status') == 'completed':
+                    full_content = final_result.get('content', '')
                     conversation = get_object_or_404(Conversation, id=conversation_id)
                     model = get_object_or_404(AIModel, id=model_id)
+                    
                     if is_regenerate:
-                        user_message = get_object_or_404(Message, id=user_message_id)
+                        # 使用 generation_id 查找原始用户消息
+                        user_message = Message.objects.filter(generation_id=generation_id, is_user=True).first()
+                        if not user_message:
+                            user_message = get_object_or_404(Message, id=user_message_id) # Fallback
+                        
                         Message.objects.filter(
                             conversation_id=conversation_id,
                             is_user=False,
@@ -476,16 +482,26 @@ def http_chat_view(request):
                         conversation=conversation,
                         content=full_content,
                         is_user=False,
-                        model_used=model
+                        model_used=model,
+                        generation_id=generation_id
                     )
                     conversation.save() # 更新 updated_at
                     
                     # 发送ID更新事件
                     id_update_event = {
                         'type': 'id_update',
-                        'data': {'generation_id': generation_id, 'message_id': ai_message.id}
+                        'data': {'generation_id': generation_id, 'message_id': ai_message.id, 'temp_id': generation_id}
                     }
                     yield f"event: {id_update_event['type']}\ndata: {json.dumps(id_update_event['data'])}\n\n"
+                
+                # 无论成功与否，最后都发送一个结束事件
+                end_event_data = {
+                    'status': final_result.get('status', 'failed') if final_result else 'failed',
+                    'error': final_result.get('error') if final_result else 'Stream ended unexpectedly.',
+                    'generation_id': generation_id
+                }
+                yield f"event: generation_end\ndata: {json.dumps(end_event_data)}\n\n"
+                logger.info(f"HTTP Service: Stream for GenID {generation_id} finished with status: {end_event_data['status']}")
 
             response = StreamingHttpResponse(sse_stream_wrapper(), content_type='text/event-stream')
             response['Cache-Control'] = 'no-cache'

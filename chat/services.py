@@ -403,14 +403,15 @@ def prepare_history_messages(conversation, model, user_message_id, is_regenerate
     return messages
 
 @database_sync_to_async
-def save_ai_message(conversation_id, content, model_id):
+def save_ai_message(conversation_id, content, model_id, generation_id=None):
     conversation = Conversation.objects.get(id=conversation_id)
     model = AIModel.objects.get(id=model_id)
     ai_message = Message.objects.create(
         conversation=conversation,
         content=content,
         is_user=False,
-        model_used=model
+        model_used=model,
+        generation_id=generation_id
     )
     conversation.save()
     return {'id': ai_message.id}
@@ -486,10 +487,15 @@ def _get_model_sync(model_id):
     except AIModel.DoesNotExist:
         return None
 
-def _prepare_history_messages_sync(conversation_id, system_prompt, model, user_message_id, is_regenerate):
+def _prepare_history_messages_sync(conversation_id, system_prompt, model, user_message_id, is_regenerate, generation_id=None):
     """同步准备API请求的消息历史，支持多模态"""
     if is_regenerate:
-        user_message = Message.objects.get(id=user_message_id)
+        # 优先使用 generation_id 查找用户消息，提供更可靠的重新生成机制
+        user_message = Message.objects.filter(generation_id=generation_id, is_user=True).first()
+        if not user_message:
+            # 如果找不到，回退到使用 message_id，以兼容旧数据或不同流程
+            user_message = get_object_or_404(Message, id=user_message_id)
+
         history_qs = Message.objects.filter(
             conversation_id=conversation_id,
             timestamp__lte=user_message.timestamp
@@ -594,7 +600,7 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
 
         # 1. 准备历史消息
         messages_for_api = _prepare_history_messages_sync(
-            conversation.id, conversation.system_prompt, model, user_message_id, is_regenerate
+            conversation.id, conversation.system_prompt, model, user_message_id, is_regenerate, generation_id=generation_id
         )
         logger.info(f"HTTP Service: Prepared {len(messages_for_api)} messages for API request. GenID: {generation_id}")
 
@@ -621,7 +627,22 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
             def stream_generator():
                 nonlocal full_content, final_status, error_detail
                 try:
+                    last_heartbeat_time = time.time()
+                    HEARTBEAT_INTERVAL = 15  # 每15秒进行一次心跳
+
                     for line in response.iter_lines():
+                        # 心跳逻辑：定期延长停止信号的TTL
+                        current_time = time.time()
+                        if current_time - last_heartbeat_time > HEARTBEAT_INTERVAL:
+                            touch_stop_request_sync(generation_id)
+                            last_heartbeat_time = current_time
+
+                        # 检查停止信号
+                        if get_stop_requested_sync(generation_id):
+                            logger.warning(f"HTTP Service: Stop request detected for GenID {generation_id}. Stopping stream.")
+                            final_status = "cancelled"
+                            break
+
                         if line:
                             line_str = line.decode('utf-8').strip()
                             if line_str.startswith('data: '):
@@ -636,13 +657,21 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
                                         yield {'type': 'stream_update', 'data': {'content': content_piece, 'generation_id': generation_id}}
                                 except json.JSONDecodeError:
                                     logger.warning(f"Could not decode stream chunk: {chunk_data}")
-                    final_status = "completed"
+                    
+                    if final_status not in ["cancelled", "failed"]:
+                        final_status = "completed"
+
                 except Exception as e:
                     logger.error(f"Error during streaming response for GenID {generation_id}: {e}", exc_info=True)
                     final_status = "failed"
                     error_detail = f"流式响应处理失败: {e}"
 
-                yield {'type': 'generation_end', 'data': {'status': final_status, 'error': error_detail if final_status == 'failed' else None, 'generation_id': generation_id}}
+                # The generator returns its final state. The view will handle it.
+                return {
+                    'status': final_status,
+                    'content': full_content,
+                    'error': error_detail if final_status == 'failed' else None
+                }
 
             return stream_generator()
         else:
@@ -664,39 +693,34 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
         final_status = "failed"
         error_detail = f"服务器内部错误: {e}"
     finally:
-        logger.info(f"HTTP Service: Generation {generation_id} for conversation {conversation_id} finished with status: {final_status}")
+        # For streaming responses, the status is finalized in the view after the generator is consumed.
+        if not is_streaming:
+            logger.info(f"HTTP Service: Generation {generation_id} for conversation {conversation_id} finished with status: {final_status}")
 
-    # 3. 保存消息并返回结果 (对非流式或流式结束时)
-    if final_status == "completed":
-        if is_regenerate:
-            user_message = get_object_or_404(Message, id=user_message_id)
-            Message.objects.filter(
-                conversation_id=conversation_id,
-                is_user=False,
-                timestamp__gt=user_message.timestamp
-            ).delete()
-            logger.info(f"HTTP Service: Deleted subsequent AI messages for regeneration. GenID: {generation_id}")
-
-        ai_message = Message.objects.create(
-            conversation=conversation,
-            content=full_content,
-            is_user=False,
-            model_used_id=model['id']
-        )
-        conversation.save()
-        ai_message_id = ai_message.id
-        logger.info(f"HTTP Service: Saved AI message {ai_message_id} to conversation {conversation_id}. GenID: {generation_id}")
-
-    # 仅为非流式模式返回字典
+    # For streaming, the function has already returned the generator.
+    # The following logic is ONLY for the non-streaming case.
     if not is_streaming:
-        return {
-            'status': final_status,
-            'content': full_content,
-            'message_id': ai_message_id,
-            'error': error_detail if final_status == 'failed' else None
-        }
-    # 流式模式下，消息保存逻辑需要在视图中处理
-    else:
+        if final_status == "completed":
+            if is_regenerate:
+                user_message = get_object_or_404(Message, id=user_message_id)
+                Message.objects.filter(
+                    conversation_id=conversation_id,
+                    is_user=False,
+                    timestamp__gt=user_message.timestamp
+                ).delete()
+                logger.info(f"HTTP Service: Deleted subsequent AI messages for regeneration. GenID: {generation_id}")
+
+            ai_message = Message.objects.create(
+                conversation=conversation,
+                content=full_content,
+                is_user=False,
+                model_used_id=model['id'],
+                generation_id=generation_id
+            )
+            conversation.save()
+            ai_message_id = ai_message.id
+            logger.info(f"HTTP Service: Saved AI message {ai_message_id} to conversation {conversation_id}. GenID: {generation_id}")
+
         return {
             'status': final_status,
             'content': full_content,
