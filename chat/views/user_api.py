@@ -374,7 +374,38 @@ def sync_conversation_api(request):
 
 from django.http import StreamingHttpResponse
 from chat.services import generate_ai_response_for_http
+from chat.state_utils import set_stop_requested_sync
 import uuid
+
+
+@login_required
+@csrf_exempt
+@require_http_methods(["POST"])
+def stop_generation_api(request):
+    """
+    处理通过HTTP发起的取消生成请求。
+    """
+    try:
+        data = json.loads(request.body)
+        generation_id = data.get('generation_id')
+
+        if not generation_id:
+            logger.warning("HTTP stop_generation_api: 请求中缺少 'generation_id'")
+            return JsonResponse({'success': False, 'message': "缺少 'generation_id'"}, status=400)
+
+        logger.info(f"HTTP stop_generation_api: 收到终止生成请求，GenID: {generation_id}")
+        
+        # 使用与WebSocket相同的状态管理功能来请求停止
+        set_stop_requested_sync(generation_id)
+
+        return JsonResponse({'success': True, 'message': '已发送停止请求。'})
+
+    except json.JSONDecodeError:
+        logger.error("HTTP stop_generation_api: 无效的JSON格式")
+        return JsonResponse({'success': False, 'message': '无效的JSON格式'}, status=400)
+    except Exception as e:
+        logger.error(f"HTTP stop_generation_api: 处理停止请求时出错: {e}", exc_info=True)
+        return JsonResponse({'success': False, 'message': f'处理请求时发生错误: {str(e)}'}, status=500)
 
 @login_required
 @csrf_exempt

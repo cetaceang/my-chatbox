@@ -385,7 +385,11 @@ async function sendHttpRequestFallback(type, payload, settings) { // settings ca
                     const eventTypeMatch = eventString.match(/event: (.*)/);
                     const eventDataMatch = eventString.match(/data: (.*)/);
                     if (eventTypeMatch && eventDataMatch) {
-                        handleStreamEvent({ type: eventTypeMatch[1], data: JSON.parse(eventDataMatch[1]) });
+                        const eventPayload = { type: eventTypeMatch[1], data: JSON.parse(eventDataMatch[1]) };
+                        // 直接调用 onmessage，确保逻辑统一
+                        if (window.chatSocket && typeof window.chatSocket.onmessage === 'function') {
+                            window.chatSocket.onmessage({ data: JSON.stringify(eventPayload) });
+                        }
                     }
                 }
             }
@@ -393,10 +397,12 @@ async function sendHttpRequestFallback(type, payload, settings) { // settings ca
             // 处理JSON响应
             const data = await response.json();
             if (data.success) {
-                // 模拟 onmessage 事件流
-                handleStreamEvent({ type: 'full_message', data: { generation_id: data.generation_id, temp_id: tempId, content: data.content } });
-                handleStreamEvent({ type: 'id_update', data: { temp_id: tempId, message_id: data.message_id } });
-                handleStreamEvent({ type: 'generation_end', data: { generation_id: data.generation_id, status: 'completed' } });
+                // 模拟 onmessage 事件流，确保逻辑统一
+                if (window.chatSocket && typeof window.chatSocket.onmessage === 'function') {
+                    window.chatSocket.onmessage({ data: JSON.stringify({ type: 'full_message', data: { generation_id: data.generation_id, temp_id: tempId, content: data.content } }) });
+                    window.chatSocket.onmessage({ data: JSON.stringify({ type: 'id_update', data: { temp_id: tempId, message_id: data.message_id } }) });
+                    window.chatSocket.onmessage({ data: JSON.stringify({ type: 'generation_end', data: { generation_id: data.generation_id, status: 'completed' } }) });
+                }
             } else {
                 throw new Error(data.error || '非流式响应报告未知错误');
             }
@@ -404,57 +410,23 @@ async function sendHttpRequestFallback(type, payload, settings) { // settings ca
 
     } catch (error) {
         console.error('[HTTP Fallback] Request failed:', error);
-        displaySystemError(`HTTP请求失败: ${error.message}`);
-        if (tempId) {
-            window.ChatStateManager.handleGenerationEnd(tempId, 'failed');
-        }
-    }
-}
-
-function handleStreamEvent(event) {
-    // 复用 WebSocket 的 onmessage 处理器来处理来自HTTP的事件
-    const mockWebSocketEvent = { data: JSON.stringify(event) };
-    if (window.chatSocket && typeof window.chatSocket.onmessage === 'function') {
-        window.chatSocket.onmessage(mockWebSocketEvent);
-    } else {
-        // 如果 onmessage 不可用，提供一个最小化的备用处理器
-        console.warn("chatSocket.onmessage not available, using minimal event handler for HTTP fallback.");
-        const { type, data } = event;
-        switch (type) {
-            case 'generation_start':
-                window.ChatStateManager.handleGenerationStart(data.generation_id, data.temp_id);
-                break;
-            case 'stream_update':
-            case 'full_message': {
-                const { generation_id, temp_id, content } = data;
-                if (window.ChatStateManager.isGenerationCancelled(generation_id)) return;
-                const isStreaming = type === 'stream_update';
-                const messageDiv = createOrFindMessageDiv(temp_id, isStreaming);
-                if (messageDiv) {
-                    const renderTarget = messageDiv.querySelector('.render-target');
-                    const currentContent = isStreaming ? (renderTarget.getAttribute('data-original-content') || '') : '';
-                    renderTarget.setAttribute('data-original-content', currentContent + content);
-                    renderMessageContent(messageDiv, isStreaming);
-                    messageDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        // 统一通过 onmessage 报告错误
+        if (window.chatSocket && typeof window.chatSocket.onmessage === 'function') {
+            const errorPayload = {
+                type: 'generation_end',
+                data: {
+                    generation_id: tempId,
+                    status: 'failed',
+                    error: `HTTP请求失败: ${error.message}`
                 }
-                break;
+            };
+            window.chatSocket.onmessage({ data: JSON.stringify(errorPayload) });
+        } else {
+            // 最终回退方案
+            displaySystemError(`HTTP请求失败: ${error.message}`);
+            if (tempId) {
+                window.ChatStateManager.handleGenerationEnd(tempId, 'failed');
             }
-            case 'id_update': {
-                const { temp_id, message_id } = data;
-                const streamingDiv = document.getElementById(`ai-response-streaming-${temp_id}`);
-                const fullDiv = document.getElementById(`ai-response-full-${temp_id}`);
-                const finalDiv = streamingDiv || fullDiv;
-                if (finalDiv) {
-                    finalDiv.setAttribute('data-message-id', message_id);
-                }
-                break;
-            }
-            case 'generation_end':
-                window.ChatStateManager.handleGenerationEnd(data.generation_id, data.status);
-                break;
-            case 'error':
-                displaySystemError(data.message);
-                break;
         }
     }
 }

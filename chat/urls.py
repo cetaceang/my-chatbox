@@ -16,6 +16,7 @@ urlpatterns = [
     path('api/messages/delete/', user_api.delete_message_api, name='api-delete-message'),
     path('api/sync_conversation/', user_api.sync_conversation_api, name='api-sync-conversation'),
     path('api/http_chat/', user_api.http_chat_view, name='api_http_chat'),
+    path('api/stop_generation/', user_api.stop_generation_api, name='api-stop-generation'),
     # API接口 - Admin/Management
     path('api/models/', admin_api.get_models_api, name='api-models'),
     path('api/providers/', admin_api.manage_providers_api, name='api-providers'),

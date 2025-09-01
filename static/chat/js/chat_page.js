@@ -185,14 +185,43 @@ async function sendStopGenerationRequest(generationIdToStop) { // Now accepts th
             window.chatSocket.send(messagePayload);
             console.log(`[Stop Request] WebSocket stop_generation message sent: ${messagePayload}`);
         } else {
-            const currentStateText = window.chatSocket ? getWebSocketStateText(window.chatSocket.readyState) : 'Not Initialized'; // Use helper if available
-            console.error(`[Stop Request] WebSocket not open or not initialized. Current state: ${currentStateText}. Cannot send stop request.`);
-            if (window.ChatStateManager && typeof window.ChatStateManager.resetStoppingState === 'function') {
-                window.ChatStateManager.resetStoppingState();
-            }
-            return; 
+            // --- HTTP Fallback for Stop Request ---
+            const currentStateText = window.chatSocket ? getWebSocketStateText(window.chatSocket.readyState) : 'Not Initialized';
+            console.warn(`[Stop Request] WebSocket not open (State: ${currentStateText}). Falling back to HTTP POST.`);
+            
+            fetch('/chat/api/stop_generation/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCookie('csrftoken')
+                },
+                body: JSON.stringify({ 'generation_id': generationIdToStop })
+            })
+            .then(response => {
+                if (!response.ok) {
+                    // Throw an error to be caught by the catch block
+                    return response.json().then(err => { throw new Error(err.message || `HTTP ${response.status}`) });
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.success) {
+                    console.log(`[Stop Request] HTTP stop request for GenID ${generationIdToStop} acknowledged by server.`);
+                    // The backend will set the stop flag. The frontend will receive a 'cancelled'
+                    // generation_end event through the ongoing HTTP stream, which will trigger the UI update.
+                } else {
+                    throw new Error(data.message || "服务器拒绝了终止请求");
+                }
+            })
+            .catch(err => {
+                console.error("[Stop Request] HTTP fallback failed:", err);
+                displaySystemError(`发送终止请求失败: ${err.message}`);
+                // Reset UI state since the request failed
+                if (window.ChatStateManager && typeof window.ChatStateManager.resetStoppingState === 'function') {
+                    window.ChatStateManager.resetStoppingState();
+                }
+            });
         }
-
     } catch (error) {
         console.error("[Stop Request] 发送终止生成请求时出错:", error);
         if (window.ChatStateManager && typeof window.ChatStateManager.resetStoppingState === 'function') {
