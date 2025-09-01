@@ -385,7 +385,16 @@ async function sendHttpRequestFallback(type, payload, settings) { // settings ca
                     const eventTypeMatch = eventString.match(/event: (.*)/);
                     const eventDataMatch = eventString.match(/data: (.*)/);
                     if (eventTypeMatch && eventDataMatch) {
-                        const eventPayload = { type: eventTypeMatch[1], data: JSON.parse(eventDataMatch[1]) };
+                        let eventType = eventTypeMatch[1];
+                        const eventData = JSON.parse(eventDataMatch[1]);
+
+                        // 将后端HTTP流的事件类型 'message_chunk' 映射到前端WS处理器期望的 'stream_update'
+                        if (eventType === 'message_chunk') {
+                            console.log("[HTTP Fallback] Translating 'message_chunk' to 'stream_update'");
+                            eventType = 'stream_update';
+                        }
+
+                        const eventPayload = { type: eventType, data: eventData };
                         // 直接调用 onmessage，确保逻辑统一
                         if (window.chatSocket && typeof window.chatSocket.onmessage === 'function') {
                             window.chatSocket.onmessage({ data: JSON.stringify(eventPayload) });

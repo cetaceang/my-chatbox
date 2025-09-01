@@ -566,6 +566,7 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
     """
     为同步的HTTP视图生成AI回复。
     - 使用 `requests` 库进行同步API调用。
+    - 通过将所有请求以流式处理来支持可中断操作。
     - 支持文本和图片上传。
     - 根据 is_streaming 返回事件生成器或结果字典。
     """
@@ -601,7 +602,7 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
         request_data = {
             "model": model['model_name'],
             "messages": messages_for_api,
-            "stream": is_streaming,
+            "stream": True,  # 关键：始终以流式请求，以实现中断检查
             **model['default_params']
         }
         api_url = ensure_valid_api_url(model['provider_base_url'], "/v1/chat/completions")
@@ -611,7 +612,7 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
             api_url,
             json=request_data,
             headers=headers,
-            stream=is_streaming, # 根据请求类型设置stream
+            stream=True, # 关键：始终以流式请求
             timeout=AI_REQUEST_TIMEOUT
         )
         response.raise_for_status()
@@ -622,33 +623,63 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
                 full_content = ""
                 final_status = "unknown"
                 error_detail = None
+                buffer = b""
                 try:
                     last_heartbeat_time = time.time()
                     HEARTBEAT_INTERVAL = 15
-                    for line in response.iter_lines():
+                    
+                    for chunk in response.iter_content(chunk_size=4096):
+                        # 检查点 #1: 在处理任何数据前立即检查
+                        if get_stop_requested_sync(generation_id):
+                            final_status = "cancelled"
+                            logger.warning(f"HTTP Service: Stop detected for GenID {generation_id} during stream. Aborting.")
+                            break
+
                         current_time = time.time()
                         if current_time - last_heartbeat_time > HEARTBEAT_INTERVAL:
                             touch_stop_request_sync(generation_id)
                             last_heartbeat_time = current_time
-                        if get_stop_requested_sync(generation_id):
-                            final_status = "cancelled"
+
+                        if not chunk:
+                            continue
+
+                        buffer += chunk
+                        # SSE使用'\n\n'作为分隔符
+                        messages = buffer.split(b'\n\n')
+                        buffer = messages.pop() # 保留最后一个不完整的消息
+
+                        for msg in messages:
+                            if not msg:
+                                continue
+                            
+                            # 检查点 #2: 在解析每个消息块前再次检查
+                            if get_stop_requested_sync(generation_id):
+                                final_status = "cancelled"
+                                break
+
+                            for line in msg.split(b'\n'):
+                                line_str = line.decode('utf-8').strip()
+                                if line_str.startswith('data: '):
+                                    chunk_data = line_str[6:]
+                                    if chunk_data == '[DONE]':
+                                        continue
+                                    try:
+                                        chunk_json = json.loads(chunk_data)
+                                        content_piece = extract_content_from_chunk(chunk_json)
+                                        if content_piece:
+                                            full_content += content_piece
+                                            yield {'type': 'stream_update', 'data': {'content': content_piece, 'generation_id': generation_id}}
+                                    except json.JSONDecodeError:
+                                        logger.warning(f"Could not decode stream chunk: {chunk_data}")
+                            if final_status == "cancelled":
+                                break
+                        if final_status == "cancelled":
                             break
-                        if line:
-                            line_str = line.decode('utf-8').strip()
-                            if line_str.startswith('data: '):
-                                chunk_data = line_str[6:]
-                                if chunk_data == '[DONE]': continue
-                                try:
-                                    chunk_json = json.loads(chunk_data)
-                                    content_piece = extract_content_from_chunk(chunk_json)
-                                    if content_piece:
-                                        full_content += content_piece
-                                        yield {'type': 'stream_update', 'data': {'content': content_piece, 'generation_id': generation_id}}
-                                except json.JSONDecodeError:
-                                    logger.warning(f"Could not decode stream chunk: {chunk_data}")
+
                     if final_status != "cancelled":
                         final_status = "completed" if full_content else "failed"
                         if final_status == "failed": error_detail = "No content received from AI."
+
                 except requests.exceptions.RequestException as e:
                     final_status, error_detail = "failed", f"AI服务请求失败: {e}"
                 except Exception as e:
@@ -659,14 +690,49 @@ def generate_ai_response_for_http(conversation_id, model_id, message_content, us
                 yield {'type': 'generation_end', 'data': end_event_data}
             return event_generator()
         else:
-            # --- 非流式响应：返回结果字典 ---
-            response_json = response.json()
-            full_content = extract_content_from_chunk(response_json)
-            if full_content:
-                return {'status': 'completed', 'content': full_content}
-            else:
-                logger.error(f"Non-streaming AI response for GenID {generation_id} completed but no content was extracted.")
-                return {'status': 'failed', 'error': 'Non-streaming response contained no content.'}
+            # --- 非流式响应：在循环中拼接，最后返回结果字典 ---
+            full_body_bytes = b""
+            final_status = "unknown"
+            try:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if get_stop_requested_sync(generation_id):
+                        final_status = "cancelled"
+                        logger.warning(f"HTTP Service: Stop detected for GenID {generation_id} during non-stream download. Aborting.")
+                        break
+                    full_body_bytes += chunk
+                
+                if final_status == "cancelled":
+                    return {'status': 'cancelled', 'error': 'Generation was cancelled by user.'}
+
+                # 从SSE格式的响应体中提取内容
+                full_content = ""
+                full_response_text = full_body_bytes.decode('utf-8')
+                for line in full_response_text.splitlines():
+                    if line.startswith('data: '):
+                        chunk_data = line[6:].strip()
+                        if chunk_data == '[DONE]':
+                            continue
+                        try:
+                            chunk_json = json.loads(chunk_data)
+                            content_piece = extract_content_from_chunk(chunk_json)
+                            if content_piece:
+                                full_content += content_piece
+                        except json.JSONDecodeError:
+                            logger.warning(f"Could not decode non-stream chunk: {chunk_data}")
+                
+                if full_content:
+                    return {'status': 'completed', 'content': full_content}
+                else:
+                    logger.error(f"Non-streaming AI response for GenID {generation_id} completed but no content was extracted.")
+                    return {'status': 'failed', 'error': 'Non-streaming response contained no content.'}
+
+            except requests.exceptions.RequestException as e:
+                logger.error(f"HTTP request to AI API failed for GenID {generation_id}: {e}", exc_info=True)
+                return {'status': 'failed', 'error': f"AI服务请求失败: {e}"}
+            except Exception as e:
+                logger.error(f"Error in non-streaming response handling for GenID {generation_id}: {e}", exc_info=True)
+                return {'status': 'failed', 'error': f"非流式响应处理失败: {e}"}
+
 
     except requests.exceptions.RequestException as e:
         logger.error(f"HTTP request to AI API failed for GenID {generation_id}: {e}", exc_info=True)

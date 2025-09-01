@@ -544,8 +544,11 @@ def http_chat_view(request):
         else:
             # --- 非流式响应处理 ---
             result = generate_ai_response_for_http(**service_kwargs)
-            
-            if result.get('status') == 'completed':
+            status = result.get('status')
+
+            logger.info(f"HTTP Service: Non-stream for GenID {generation_id} finished with status: {status}")
+
+            if status == 'completed':
                 try:
                     full_content = result.get('content', '')
                     conversation = get_object_or_404(Conversation, id=conversation_id)
@@ -560,7 +563,6 @@ def http_chat_view(request):
                     )
                     conversation.save()
                     
-                    logger.info(f"HTTP Service: Non-stream for GenID {generation_id} finished and saved with status: completed")
                     return JsonResponse({
                         'success': True,
                         'content': full_content,
@@ -570,8 +572,16 @@ def http_chat_view(request):
                 except Exception as db_error:
                     logger.error(f"Error during DB ops for non-stream GenID {generation_id}: {db_error}", exc_info=True)
                     return JsonResponse({'success': False, 'error': f'数据库操作失败: {db_error}', 'generation_id': generation_id}, status=500)
-            else:
-                logger.info(f"HTTP Service: Non-stream for GenID {generation_id} finished with status: {result.get('status', 'failed')}")
+            
+            elif status == 'cancelled':
+                return JsonResponse({
+                    'success': True, # 请求本身是成功的
+                    'status': 'cancelled',
+                    'message': '生成已由用户取消。',
+                    'generation_id': generation_id,
+                })
+
+            else: # failed 或其他状态
                 return JsonResponse({
                     'success': False,
                     'error': result.get('error', '未知错误'),
