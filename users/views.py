@@ -18,8 +18,7 @@ def register(request):
         form = UserCreationForm(request.POST)
         if form.is_valid():
             user = form.save()
-            # 创建用户资料
-            UserProfile.objects.create(user=user)
+            # UserProfile is created by a signal, so we don't need to create it here.
             login(request, user)
             messages.success(request, '注册成功！')
             return redirect('chat-main') # 注册成功后跳转到聊天主页

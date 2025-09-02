@@ -442,30 +442,18 @@ def http_chat_view(request):
         if not model_id or (not message_content and not is_regenerate and not file):
             return HttpResponseBadRequest("Missing required parameters")
 
-        # --- 新增：在视图层面对齐WS的重新生成逻辑 ---
+        # --- 2. 准备消息ID和创建用户消息 (同步) ---
         if is_regenerate:
+            # 对于重新生成，传入的 message_id 实际上是 generation_id。
+            # 我们需要用它来找到对应的用户消息的真实整数 ID。
             try:
-                # 尝试将 message_id 视为 UUID
-                uuid.UUID(user_message_id)
-                # 如果成功，说明是 generation_id，需要解析出真正的用户消息ID
-                ai_message_to_regenerate = get_object_or_404(Message, generation_id=user_message_id, is_user=False)
-                user_message = Message.objects.filter(
-                    conversation_id=conversation_id,
-                    is_user=True,
-                    timestamp__lt=ai_message_to_regenerate.timestamp
-                ).latest('timestamp')
-                user_message_id = user_message.id # 覆盖为正确的整数ID
-                logger.info(f"HTTP View: Regenerate - Resolved user message ID to {user_message_id} from generation_id.")
-            except (ValueError, TypeError, AttributeError):
-                # 如果不是有效的UUID，就假定它已经是正确的整数ID
-                logger.info(f"HTTP View: Regenerate - Using provided user message ID {user_message_id} as integer.")
-                pass # 保持 user_message_id 不变
-            except Message.DoesNotExist:
-                 return HttpResponseBadRequest("Could not find a valid message to regenerate from.")
-
-
-        # --- 2. 创建用户消息 (同步) ---
-        if not is_regenerate:
+                # 关键修复：这里必须是 is_user=True，因为 generation_id 是附加在用户消息上的
+                user_message_to_regenerate = get_object_or_404(Message, generation_id=user_message_id, is_user=True)
+                user_message_id = user_message_to_regenerate.id # 用真实的整数ID覆盖变量
+            except Exception: # 捕获 Http404 或其他可能的错误
+                 return HttpResponseBadRequest("要重新生成的消息不存在或 generation_id 无效。")
+        else:
+            # 仅在不是重新生成的情况下创建新的用户消息
             conversation = get_object_or_404(Conversation, id=conversation_id, user=request.user)
             display_content = message_content if message_content.strip() else ('[图片上传]' if file else '')
             user_message = Message.objects.create(

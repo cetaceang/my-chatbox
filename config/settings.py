@@ -185,14 +185,23 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Channels配置
 ASGI_APPLICATION = 'config.asgi.application'
 
-# Dynamic Cache Configuration
-CACHE_TYPE = os.getenv('CACHE_TYPE', 'memory')
+# ==============================================================================
+# DYNAMIC BACKEND CONFIGURATION (Cache and Channels)
+# ==============================================================================
+# Use a single environment variable to control the backend for both Cache and Channels.
+# - 'redis': Use Redis for production (requires Redis server).
+# - 'memory': Use in-memory backend for local development.
+BACKEND_TYPE = os.getenv('CACHE_TYPE', 'memory').lower()
 
-if CACHE_TYPE == 'redis':
+if BACKEND_TYPE == 'redis':
+    # When using Redis, default the host to 'localhost'.
+    # This allows local development without setting REDIS_HOST in .env.
+    # For Docker, set REDIS_HOST=redis in the .env file.
     REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
     REDIS_PORT = os.getenv('REDIS_PORT', '6379')
-    REDIS_DB_CACHE = os.getenv('REDIS_DB_CACHE', '2')
     
+    # --- Django Cache Configuration ---
+    REDIS_DB_CACHE = os.getenv('REDIS_DB_CACHE', '2')
     CACHES = {
         "default": {
             "BACKEND": "django_redis.cache.RedisCache",
@@ -202,33 +211,28 @@ if CACHE_TYPE == 'redis':
             }
         }
     }
-else:
+
+    # --- Channels Layer Configuration ---
+    REDIS_DB_CHANNELS = os.getenv('REDIS_DB_CHANNELS', '1')
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {
+                "hosts": [f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB_CHANNELS}"],
+            },
+        },
+    }
+    
+else: # 'memory' or any other value
+    # --- Django Cache Configuration (In-Memory) ---
     CACHES = {
         'default': {
             'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
             'LOCATION': 'unique-snowflake',
         }
     }
-
-# Dynamic Channel Layer Configuration
-REDIS_HOST = os.getenv('REDIS_HOST')
-
-if REDIS_HOST:
-    # 动态构建标准的 Redis URL，包含专用的数据库编号
-    REDIS_PORT = os.getenv('REDIS_PORT', '6379') # 确保端口一致性
-    REDIS_DB_CHANNELS = os.getenv('REDIS_DB_CHANNELS', '1')
-    redis_url = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB_CHANNELS}"
-
-    CHANNEL_LAYERS = {
-        "default": {
-            "BACKEND": "channels_redis.core.RedisChannelLayer",
-            "CONFIG": {
-                # "hosts" 应该是一个包含 URL 字符串的列表
-                "hosts": [redis_url],
-            },
-        },
-    }
-else:
+    
+    # --- Channels Layer Configuration (In-Memory) ---
     CHANNEL_LAYERS = {
         'default': {
             'BACKEND': 'channels.layers.InMemoryChannelLayer',

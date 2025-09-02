@@ -9,7 +9,7 @@ import base64
 import re
 import mimetypes
 import os
-from asgiref.sync import async_to_sync
+from asgiref.sync import async_to_sync, sync_to_async
 from channels.layers import get_channel_layer
 from django.shortcuts import get_object_or_404
 from django.core.files.storage import default_storage
@@ -468,9 +468,22 @@ def extract_content_from_chunk(chunk_json):
     return None
 
 
+import threading
+import queue
+from concurrent.futures import ThreadPoolExecutor
+
 # =====================================================================================
 # == 同步HTTP服务函数 (Synchronous HTTP Service Functions)
 # =====================================================================================
+
+# 初始化一个全局的、可配置的线程池
+# 从环境变量读取最大工作线程数，提供一个安全的默认值
+try:
+    max_threads = int(os.getenv('MAX_WORKER_THREADS', '20'))
+except (ValueError, TypeError):
+    max_threads = 20
+http_worker_pool = ThreadPoolExecutor(max_workers=max_threads)
+logger.info(f"Initialized HTTP worker thread pool with max_workers={max_threads}")
 
 def _get_model_sync(model_id):
     """同步获取模型信息"""
@@ -490,9 +503,7 @@ def _get_model_sync(model_id):
 def _prepare_history_messages_sync(conversation_id, system_prompt, model, user_message_id, is_regenerate, generation_id=None):
     """同步准备API请求的消息历史，支持多模态"""
     if is_regenerate:
-        # 与异步版本逻辑对齐：直接使用 user_message_id (必须是整数) 查找用户消息
         user_message = get_object_or_404(Message, id=user_message_id)
-
         history_qs = Message.objects.filter(
             conversation_id=conversation_id,
             timestamp__lte=user_message.timestamp
@@ -521,7 +532,6 @@ def _prepare_history_messages_sync(conversation_id, system_prompt, model, user_m
 
     for msg in history_messages:
         role = "user" if msg.is_user else "assistant"
-        
         file_match = re.search(r'\[file:(.*?)\]', msg.content)
 
         if msg.id in latest_image_ids_to_include and file_match:
@@ -532,23 +542,19 @@ def _prepare_history_messages_sync(conversation_id, system_prompt, model, user_m
                 if default_storage.exists(file_path):
                     with default_storage.open(file_path, 'rb') as f:
                         file_data = f.read()
-                    
                     base64_content = base64.b64encode(file_data).decode('utf-8')
                     mime_type, _ = mimetypes.guess_type(file_path)
                     if not mime_type: mime_type = 'application/octet-stream'
-                    
                     multi_modal_content = [
                         {"type": "text", "text": text_content},
                         {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_content}"}}
                     ]
                     messages.append({"role": role, "content": multi_modal_content})
                 else:
-                    final_content = f"{text_content}\n[图片上传失败: 文件不存在]"
-                    messages.append({"role": role, "content": final_content})
+                    messages.append({"role": role, "content": f"{text_content}\n[图片上传失败: 文件不存在]"})
             except Exception as e:
                 logger.error(f"处理消息 {msg.id} 中的文件 '{file_path}' 时出错: {e}", exc_info=True)
-                final_content = f"{text_content}\n[图片处理失败]"
-                messages.append({"role": role, "content": final_content})
+                messages.append({"role": role, "content": f"{text_content}\n[图片处理失败]"})
         
         elif msg.is_user and file_match:
             file_path = file_match.group(1)
@@ -561,192 +567,164 @@ def _prepare_history_messages_sync(conversation_id, system_prompt, model, user_m
             
     return messages
 
+def _http_stream_generator(conversation_id, model_id, message_content, user_message_id, is_regenerate, generation_id, file_data=None, file_name=None):
+    """
+    一个生成器函数，它处理线程化的AI请求并产生事件。
+    这是核心的非阻塞逻辑。
+    """
+    logger.info(f"Threaded HTTP Stream Generator: Starting with ID {generation_id}")
+    q = queue.Queue()
+
+    def worker():
+        """在后台线程中运行的函数，执行网络请求并将结果放入队列。"""
+        try:
+            conversation = get_object_or_404(Conversation, id=conversation_id)
+            model = _get_model_sync(model_id)
+            if not model: raise ValueError("AI model not found.")
+
+            if file_data and file_name and user_message_id:
+                try:
+                    # 使用 ContentFile 处理二进制数据
+                    file_content = ContentFile(file_data)
+                    saved_path = default_storage.save(f"uploads/{generation_id}_{file_name}", file_content)
+                    msg_to_update = Message.objects.get(id=user_message_id)
+                    new_content = f"{message_content}\n[file:{saved_path}]" if message_content.strip() else f"[file:{saved_path}]"
+                    msg_to_update.content = new_content
+                    msg_to_update.save()
+                except Exception as e:
+                    # 将异常放入队列，以便主线程可以处理它
+                    raise ValueError(f"File upload processing failed: {e}")
+
+            messages_for_api = _prepare_history_messages_sync(
+                conversation.id, conversation.system_prompt, model, user_message_id, is_regenerate, generation_id=generation_id
+            )
+            
+            request_data = {
+                "model": model['model_name'], "messages": messages_for_api,
+                "stream": True, **model['default_params'] # 始终流式请求
+            }
+            api_url = ensure_valid_api_url(model['provider_base_url'], "/v1/chat/completions")
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {model['provider_api_key']}"}
+
+            with requests.post(
+                api_url, json=request_data, headers=headers,
+                stream=True, timeout=AI_REQUEST_TIMEOUT
+            ) as response:
+                response.raise_for_status()
+
+                for chunk in response.iter_content(chunk_size=4096):
+                    q.put(chunk)
+                    if get_stop_requested_sync(generation_id):
+                        logger.warning(f"Threaded HTTP Service: Stop detected for GenID {generation_id}. Worker thread terminating.")
+                        break
+        
+        except Exception as e:
+            logger.error(f"Error in worker thread for GenID {generation_id}: {e}", exc_info=True)
+            q.put(e)
+        finally:
+            q.put(None) # 哨兵值，表示工作完成
+
+    # 将 worker 提交到全局线程池执行
+    http_worker_pool.submit(worker)
+
+    # --- 事件处理循环，现在是生成器的主体 ---
+    full_content = ""
+    final_status = "unknown"
+    error_detail = None
+    buffer = b""
+    
+    last_heartbeat_time = time.time()
+    HEARTBEAT_INTERVAL = 15
+
+    while True:
+        if get_stop_requested_sync(generation_id):
+            final_status = "cancelled"
+            logger.warning(f"Threaded HTTP Service: Stop detected for GenID {generation_id} in main thread. Aborting.")
+            break
+
+        try:
+            item = q.get(timeout=1.0)
+        except queue.Empty:
+            if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
+                touch_stop_request_sync(generation_id)
+                last_heartbeat_time = time.time()
+            continue
+
+        if item is None: # 哨兵值，流结束
+            break
+        if isinstance(item, Exception):
+            final_status, error_detail = "failed", f"AI服务请求失败: {item}"
+            break
+
+        buffer += item
+        messages = buffer.split(b'\n\n')
+        buffer = messages.pop()
+
+        for msg in messages:
+            if not msg: continue
+            if get_stop_requested_sync(generation_id):
+                final_status = "cancelled"
+                break
+            
+            for line in msg.split(b'\n'):
+                line_str = line.decode('utf-8').strip()
+                if line_str.startswith('data: '):
+                    chunk_data = line_str[6:]
+                    if chunk_data == '[DONE]': continue
+                    try:
+                        chunk_json = json.loads(chunk_data)
+                        content_piece = extract_content_from_chunk(chunk_json)
+                        if content_piece:
+                            full_content += content_piece
+                            # 无条件地产生更新事件
+                            yield {'type': 'stream_update', 'data': {'content': content_piece, 'generation_id': generation_id}}
+                    except json.JSONDecodeError:
+                        logger.warning(f"Could not decode stream chunk: {chunk_data}")
+            if final_status == "cancelled": break
+        if final_status == "cancelled": break
+    
+    if final_status not in ["cancelled", "failed"]:
+        final_status = "completed" if full_content else "failed"
+        if final_status == "failed": error_detail = "No content received from AI."
+
+    end_event_data = {'status': final_status, 'generation_id': generation_id, 'full_content': full_content}
+    if error_detail: end_event_data['error'] = error_detail
+    # 无条件地产生结束事件
+    yield {'type': 'generation_end', 'data': end_event_data}
+
 
 def generate_ai_response_for_http(conversation_id, model_id, message_content, user_message_id, is_regenerate, generation_id, is_streaming, file_data=None, file_name=None):
     """
     为同步的HTTP视图生成AI回复。
-    - 使用 `requests` 库进行同步API调用。
-    - 通过将所有请求以流式处理来支持可中断操作。
-    - 支持文本和图片上传。
-    - 根据 is_streaming 返回事件生成器或结果字典。
+    - 使用后台线程和队列来执行 `requests` 调用，避免阻塞主线程。
+    - 关键：对AI的请求始终是流式的，以避免超时并允许中断。
+    - 根据 is_streaming 参数，返回同步生成器或结果字典。
     """
-    logger.info(f"HTTP Service: Starting generation with ID {generation_id} for conversation {conversation_id}")
+    
+    # 获取生成器
+    response_generator = _http_stream_generator(
+        conversation_id, model_id, message_content, user_message_id, 
+        is_regenerate, generation_id, file_data, file_name
+    )
 
-    try:
-        conversation = get_object_or_404(Conversation, id=conversation_id)
-        model = _get_model_sync(model_id)
-        if not model:
-            raise ValueError("AI model not found.")
+    if is_streaming:
+        # 对于流式请求，直接返回生成器。
+        return response_generator
+    else:
+        # 对于非流式请求，消耗生成器并返回最终的字典。
+        final_event_data = None
+        for event in response_generator:
+            if event['type'] == 'generation_end':
+                final_event_data = event['data']
+                # 我们只需要最后一个事件，所以可以跳出循环
+                break
+        
+        if not final_event_data:
+            return {'status': 'failed', 'error': 'Incomplete generation process.'}
 
-        # --- 文件上传处理 ---
-        if file_data and file_name and user_message_id:
-            try:
-                saved_path = default_storage.save(f"uploads/{generation_id}_{file_name}", ContentFile(file_data))
-                msg_to_update = Message.objects.get(id=user_message_id)
-                if message_content.strip():
-                    msg_to_update.content = f"{message_content}\n[file:{saved_path}]"
-                else:
-                    msg_to_update.content = f"[file:{saved_path}]"
-                msg_to_update.save()
-                logger.info(f"HTTP Service: Updated user message {user_message_id} with file reference: {saved_path}")
-            except Exception as e:
-                raise ValueError(f"File upload processing failed: {e}")
-
-        # 1. 准备历史消息
-        messages_for_api = _prepare_history_messages_sync(
-            conversation.id, conversation.system_prompt, model, user_message_id, is_regenerate, generation_id=generation_id
-        )
-        logger.info(f"HTTP Service: Prepared {len(messages_for_api)} messages for API request. GenID: {generation_id}")
-
-        # 2. 构建并发送AI请求
-        request_data = {
-            "model": model['model_name'],
-            "messages": messages_for_api,
-            "stream": True,  # 关键：始终以流式请求，以实现中断检查
-            **model['default_params']
-        }
-        api_url = ensure_valid_api_url(model['provider_base_url'], "/v1/chat/completions")
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {model['provider_api_key']}"}
-
-        response = requests.post(
-            api_url,
-            json=request_data,
-            headers=headers,
-            stream=True, # 关键：始终以流式请求
-            timeout=AI_REQUEST_TIMEOUT
-        )
-        response.raise_for_status()
-
-        if is_streaming:
-            # --- 流式响应：返回事件生成器 ---
-            def event_generator():
-                full_content = ""
-                final_status = "unknown"
-                error_detail = None
-                buffer = b""
-                try:
-                    last_heartbeat_time = time.time()
-                    HEARTBEAT_INTERVAL = 15
-                    
-                    for chunk in response.iter_content(chunk_size=4096):
-                        # 检查点 #1: 在处理任何数据前立即检查
-                        if get_stop_requested_sync(generation_id):
-                            final_status = "cancelled"
-                            logger.warning(f"HTTP Service: Stop detected for GenID {generation_id} during stream. Aborting.")
-                            break
-
-                        current_time = time.time()
-                        if current_time - last_heartbeat_time > HEARTBEAT_INTERVAL:
-                            touch_stop_request_sync(generation_id)
-                            last_heartbeat_time = current_time
-
-                        if not chunk:
-                            continue
-
-                        buffer += chunk
-                        # SSE使用'\n\n'作为分隔符
-                        messages = buffer.split(b'\n\n')
-                        buffer = messages.pop() # 保留最后一个不完整的消息
-
-                        for msg in messages:
-                            if not msg:
-                                continue
-                            
-                            # 检查点 #2: 在解析每个消息块前再次检查
-                            if get_stop_requested_sync(generation_id):
-                                final_status = "cancelled"
-                                break
-
-                            for line in msg.split(b'\n'):
-                                line_str = line.decode('utf-8').strip()
-                                if line_str.startswith('data: '):
-                                    chunk_data = line_str[6:]
-                                    if chunk_data == '[DONE]':
-                                        continue
-                                    try:
-                                        chunk_json = json.loads(chunk_data)
-                                        content_piece = extract_content_from_chunk(chunk_json)
-                                        if content_piece:
-                                            full_content += content_piece
-                                            yield {'type': 'stream_update', 'data': {'content': content_piece, 'generation_id': generation_id}}
-                                    except json.JSONDecodeError:
-                                        logger.warning(f"Could not decode stream chunk: {chunk_data}")
-                            if final_status == "cancelled":
-                                break
-                        if final_status == "cancelled":
-                            break
-
-                    if final_status != "cancelled":
-                        final_status = "completed" if full_content else "failed"
-                        if final_status == "failed": error_detail = "No content received from AI."
-
-                except requests.exceptions.RequestException as e:
-                    final_status, error_detail = "failed", f"AI服务请求失败: {e}"
-                except Exception as e:
-                    final_status, error_detail = "failed", f"流式响应处理失败: {e}"
-                
-                end_event_data = {'status': final_status, 'generation_id': generation_id, 'full_content': full_content}
-                if error_detail: end_event_data['error'] = error_detail
-                yield {'type': 'generation_end', 'data': end_event_data}
-            return event_generator()
-        else:
-            # --- 非流式响应：在循环中拼接，最后返回结果字典 ---
-            full_body_bytes = b""
-            final_status = "unknown"
-            try:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if get_stop_requested_sync(generation_id):
-                        final_status = "cancelled"
-                        logger.warning(f"HTTP Service: Stop detected for GenID {generation_id} during non-stream download. Aborting.")
-                        break
-                    full_body_bytes += chunk
-                
-                if final_status == "cancelled":
-                    return {'status': 'cancelled', 'error': 'Generation was cancelled by user.'}
-
-                # 从SSE格式的响应体中提取内容
-                full_content = ""
-                full_response_text = full_body_bytes.decode('utf-8')
-                for line in full_response_text.splitlines():
-                    if line.startswith('data: '):
-                        chunk_data = line[6:].strip()
-                        if chunk_data == '[DONE]':
-                            continue
-                        try:
-                            chunk_json = json.loads(chunk_data)
-                            content_piece = extract_content_from_chunk(chunk_json)
-                            if content_piece:
-                                full_content += content_piece
-                        except json.JSONDecodeError:
-                            logger.warning(f"Could not decode non-stream chunk: {chunk_data}")
-                
-                if full_content:
-                    return {'status': 'completed', 'content': full_content}
-                else:
-                    logger.error(f"Non-streaming AI response for GenID {generation_id} completed but no content was extracted.")
-                    return {'status': 'failed', 'error': 'Non-streaming response contained no content.'}
-
-            except requests.exceptions.RequestException as e:
-                logger.error(f"HTTP request to AI API failed for GenID {generation_id}: {e}", exc_info=True)
-                return {'status': 'failed', 'error': f"AI服务请求失败: {e}"}
-            except Exception as e:
-                logger.error(f"Error in non-streaming response handling for GenID {generation_id}: {e}", exc_info=True)
-                return {'status': 'failed', 'error': f"非流式响应处理失败: {e}"}
-
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"HTTP request to AI API failed for GenID {generation_id}: {e}", exc_info=True)
-        error_detail = f"AI服务请求失败: {e}"
-        if is_streaming:
-            def error_generator(): yield {'type': 'generation_end', 'data': {'status': 'failed', 'error': error_detail, 'generation_id': generation_id}}
-            return error_generator()
-        else:
-            return {'status': 'failed', 'error': error_detail}
-    except Exception as e:
-        logger.error(f"Error in generate_ai_response_for_http for GenID {generation_id}: {e}", exc_info=True)
-        error_detail = f"服务器内部错误: {e}"
-        if is_streaming:
-            def error_generator(): yield {'type': 'generation_end', 'data': {'status': 'failed', 'error': error_detail, 'generation_id': generation_id}}
-            return error_generator()
-        else:
-            return {'status': 'failed', 'error': error_detail}
+        if final_event_data['status'] == 'completed':
+            return {'status': 'completed', 'content': final_event_data['full_content']}
+        elif final_event_data['status'] == 'cancelled':
+            return {'status': 'cancelled', 'error': 'Generation was cancelled by user.'}
+        else: # failed
+            return {'status': 'failed', 'error': final_event_data.get('error') or 'Unknown error.'}
