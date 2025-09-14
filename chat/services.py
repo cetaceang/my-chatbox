@@ -3,6 +3,7 @@ import logging
 import uuid
 import time
 import asyncio
+from async_timeout import timeout
 import aiohttp
 import requests # For synchronous HTTP requests
 import base64
@@ -125,8 +126,8 @@ async def generate_ai_response(conversation_id, model_id, message=None, user_mes
         # 增加块间超时设置
         INTER_CHUNK_TIMEOUT = 20  # 如果20秒内没有收到任何数据（包括空包），则超时
         
-        timeout = aiohttp.ClientTimeout(total=AI_REQUEST_TIMEOUT)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        client_timeout = aiohttp.ClientTimeout(total=AI_REQUEST_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
             # 在请求前再次检查，以防万一
             if get_stop_requested_sync(real_generation_id):
                 logger.warning(f"Service: Stop request detected for GenID {real_generation_id} just before making API call. Aborting.")
@@ -153,8 +154,8 @@ async def generate_ai_response(conversation_id, model_id, message=None, user_mes
                                         final_status = "cancelled"
                                         break
 
-                                    # 使用块间超时来防止无限期挂起
-                                    async with asyncio.timeout(INTER_CHUNK_TIMEOUT):
+                                    # 使用块间超时来防止无限期挂起（兼容 Py<3.11）
+                                    async with timeout(INTER_CHUNK_TIMEOUT):
                                         chunk = await response.content.read(4096)
                                     
                                     if not chunk:

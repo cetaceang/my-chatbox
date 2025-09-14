@@ -242,6 +242,15 @@ def delete_message_api(request):
         data = json.loads(request.body)
         message_id = data.get('message_id')
 
+        # 后端安全校验：只接受整数型ID，避免将UUID字符串当作主键导致500
+        try:
+            message_id_int = int(message_id)
+        except (TypeError, ValueError):
+            return JsonResponse({
+                'success': False,
+                'message': "无效的消息ID"
+            }, status=400)
+
         if not message_id:
             return JsonResponse({
                 'success': False,
@@ -249,7 +258,7 @@ def delete_message_api(request):
             }, status=400)
 
         try:
-            message = Message.objects.get(id=message_id)
+            message = Message.objects.get(id=message_id_int)
             if message.conversation.user != request.user:
                 return JsonResponse({
                     'success': False,
@@ -486,6 +495,13 @@ def http_chat_view(request):
             event_generator = generate_ai_response_for_http(**service_kwargs)
 
             def sse_stream_wrapper(generator):
+                # 在开始推送AI流之前，先把用户消息ID映射通知给前端（与WS逻辑对齐）
+                if not is_regenerate and user_message_id:
+                    try:
+                        user_id_update = { 'temp_id': generation_id, 'user_message_id': user_message_id }
+                        yield f"event: user_message_id_update\ndata: {json.dumps(user_id_update)}\n\n"
+                    except Exception:
+                        pass
                 final_event_data = None
                 for event in generator:
                     if event['type'] == 'generation_end':
@@ -556,6 +572,7 @@ def http_chat_view(request):
                         'content': full_content,
                         'message_id': ai_message.id,
                         'generation_id': generation_id,
+                        'user_message_id': user_message_id,
                     })
                 except Exception as db_error:
                     logger.error(f"Error during DB ops for non-stream GenID {generation_id}: {db_error}", exc_info=True)

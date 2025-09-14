@@ -443,7 +443,19 @@ function deleteMessage(messageId, messageDiv) {
     if (!messageId || !messageDiv) return;
 
     // 检查ID是否为临时UUID (非数字)
-    if (isNaN(parseInt(messageId, 10))) {
+    // 更稳健判断：纯数字ID才视为真实消息ID；否则尝试从映射解析
+    const isNumericString = typeof messageId === 'string' && /^\d+$/.test(messageId);
+    const isNumericValue = typeof messageId === 'number' && Number.isInteger(messageId);
+    let serverId = null;
+    if (isNumericString || isNumericValue) {
+        serverId = String(messageId);
+    } else if (typeof getRealMessageId === 'function') {
+        const resolved = getRealMessageId(messageId);
+        if (resolved && /^\d+$/.test(String(resolved))) {
+            serverId = String(resolved);
+        }
+    }
+    if (!serverId) {
         console.log(`检测到临时ID (${messageId})，仅在前端删除。`);
         messageDiv.remove();
         // 如果是用户消息，也删除其后的AI消息占位符
@@ -459,20 +471,20 @@ function deleteMessage(messageId, messageDiv) {
 
     // Handle real message deletion
     if (confirm('确定要删除这条消息吗？此操作不可恢复。')) {
-        console.log("Requesting deletion for message ID:", messageId);
+        console.log("Requesting deletion for message ID:", serverId);
         fetch('/chat/api/messages/delete/', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRFToken': getCookie('csrftoken')
             },
-            body: JSON.stringify({ 'message_id': messageId })
+            body: JSON.stringify({ 'message_id': serverId })
         })
         .then(response => response.json())
         .then(data => {
             if (data.success) {
                 console.log("Message deleted successfully from server.");
-                const messageToRemove = document.querySelector(`.alert[data-message-id="${messageId}"]`);
+                const messageToRemove = document.querySelector(`.alert[data-message-id="${serverId}"]`);
                 let nextAIMessageToRemove = null;
 
                 // If deleting a user message, find the next AI message

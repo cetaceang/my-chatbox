@@ -171,19 +171,27 @@ function handleIncomingMessage(eventData) {
                 .catch(error => console.error('Error refreshing conversation list:', error));
             break;
 
-        case 'user_message_id_update':
+        case 'user_message_id_update': {
+            // 同时兼容顶层字段与 data 包裹的字段（HTTP SSE 会走 data 包裹）
+            const tmpId = eventData.temp_id ?? (data && data.temp_id);
+            const userMsgId = eventData.user_message_id ?? (data && data.user_message_id);
+            if (!tmpId || !userMsgId) { break; }
+
             // 更新ID管理器
-            window.tempIdManager.set(eventData.temp_id, eventData.user_message_id);
-            
+            window.tempIdManager.set(tmpId, userMsgId);
+
             // 更新DOM
-            const userMessageDiv = messageContainer.querySelector(`.alert[data-temp-id="${eventData.temp_id}"]`);
+            const userMessageDiv = messageContainer.querySelector(`.alert[data-temp-id="${tmpId}"]`);
             if (userMessageDiv) {
-                userMessageDiv.setAttribute('data-message-id', eventData.user_message_id);
+                userMessageDiv.setAttribute('data-message-id', userMsgId);
             }
-            
+
             // 新增：同步ChatStateManager的状态
-            window.ChatState.updateMessageId(eventData.temp_id, eventData.user_message_id);
+            if (window.ChatState && typeof window.ChatState.updateMessageId === 'function') {
+                window.ChatState.updateMessageId(tmpId, userMsgId);
+            }
             break;
+        }
 
         case 'generation_start':
             window.ChatStateManager.handleGenerationStart(data.generation_id, data.temp_id);
@@ -406,6 +414,10 @@ async function sendHttpRequestFallback(type, payload, settings) { // settings ca
             // 处理JSON响应
             const data = await response.json();
             if (data.success) {
+                // 若后端提供 user_message_id（非流式），先同步用户消息ID映射
+                if (data.user_message_id) {
+                    handleIncomingMessage({ type: 'user_message_id_update', temp_id: tempId, user_message_id: data.user_message_id });
+                }
                 // 直接调用 handleIncomingMessage，确保逻辑统一
                 handleIncomingMessage({ type: 'full_message', data: { generation_id: data.generation_id, temp_id: tempId, content: data.content } });
                 handleIncomingMessage({ type: 'id_update', data: { temp_id: tempId, message_id: data.message_id } });
