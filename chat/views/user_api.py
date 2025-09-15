@@ -457,14 +457,17 @@ def http_chat_view(request):
 
         # --- 2. 准备消息ID和创建用户消息 (同步) ---
         if is_regenerate:
-            # 对于重新生成，传入的 message_id 实际上是 generation_id。
-            # 我们需要用它来找到对应的用户消息的真实整数 ID。
+            # 重新生成时，前端传来的 message_id 就是“被重新生成的那条用户消息”的真实ID
+            # generation_id 是这一次重新生成操作的新ID，用于跟踪本次生成流程
             try:
-                # 关键修复：这里必须是 is_user=True，因为 generation_id 是附加在用户消息上的
-                user_message_to_regenerate = get_object_or_404(Message, generation_id=user_message_id, is_user=True)
-                user_message_id = user_message_to_regenerate.id # 用真实的整数ID覆盖变量
-            except Exception: # 捕获 Http404 或其他可能的错误
-                 return HttpResponseBadRequest("要重新生成的消息不存在或 generation_id 无效。")
+                # 确认该ID存在且属于用户消息
+                user_message = get_object_or_404(Message, id=int(user_message_id), is_user=True)
+                # 可选的安全校验：会话一致性
+                if conversation_id and str(user_message.conversation_id) != str(conversation_id):
+                    return HttpResponseBadRequest("会话ID与目标消息不匹配。")
+                user_message_id = user_message.id
+            except Exception:
+                return HttpResponseBadRequest("要重新生成的用户消息不存在或参数无效。")
         else:
             # 仅在不是重新生成的情况下创建新的用户消息
             conversation = get_object_or_404(Conversation, id=conversation_id, user=request.user)
