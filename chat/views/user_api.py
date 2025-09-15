@@ -65,6 +65,9 @@ def conversations_api(request):
                 if 'selected_model_id' in data:
                     model = get_object_or_404(AIModel, id=data['selected_model_id'])
                     conversation.selected_model = model
+                # 持久化更新系统提示词
+                if 'system_prompt' in data:
+                    conversation.system_prompt = data.get('system_prompt') or ''
 
                 conversation.save()
 
@@ -365,7 +368,8 @@ def sync_conversation_api(request):
                 'created_at': conversation.created_at.isoformat(),
                 'updated_at': conversation.updated_at.isoformat(),
                 'model_id': conversation.selected_model.id if conversation.selected_model else None,
-                'model_name': conversation.selected_model.display_name if conversation.selected_model else None
+                'model_name': conversation.selected_model.display_name if conversation.selected_model else None,
+                'system_prompt': conversation.system_prompt or ''
             },
             'messages': messages_data
         }

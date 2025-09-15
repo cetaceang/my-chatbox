@@ -174,8 +174,8 @@
     const conversationIdRaw = '{% if conversation %}{{ conversation.id }}{% else %}{% endif %}';
     window.conversationId = conversationIdRaw ? conversationIdRaw : null;
     window.tempIdMap = {};
-    // 将系统提示词也存储在全局变量中
-    window.systemPrompt = `{{ conversation.system_prompt|escapejs|default:'' }}`;
+    // 将系统提示词也存储在全局变量中（先 default 再 escape，避免 None 文本显示）
+    window.systemPrompt = `{{ conversation.system_prompt|default:''|escapejs }}`;
 </script>
 
 <!-- Load External JavaScript Modules -->
